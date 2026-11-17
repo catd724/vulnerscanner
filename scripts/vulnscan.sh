@@ -71,6 +71,8 @@ fi
 # shellcheck source=lib/library_check.sh
 . "$SCRIPT_DIR/library_check.sh"
 
+OUTPUT_JSON=0
+
 print_help() {
   cat <<'EOF'
 Automated Linux Vulnerability Scanner
@@ -83,6 +85,7 @@ Options:
   --pm2             Check PM2 process status
   --library-vulns   Check installed libraries/packages for known CVEs
   --full            Run all checks
+  --json            Output raw JSON instead of human-readable summary
   --help            Show this help message
 
 With no options, an interactive menu is shown.
@@ -92,22 +95,100 @@ Remote execution:
 EOF
 }
 
+# Print a human-readable summary from a JSON scan result.
+format_human() {
+  local result="$1"
+  local scan_type
+  scan_type=$(echo "$result" | jq -r '.scan_type // "unknown"')
+  local host
+  host=$(echo "$result" | jq -r '.host // "unknown"')
+  local ts
+  ts=$(echo "$result" | jq -r '.timestamp // "unknown"')
+  local ok
+  ok=$(echo "$result" | jq -r '.ok // false')
+  local note
+  note=$(echo "$result" | jq -r '.note // ""')
+  local error
+  error=$(echo "$result" | jq -r '.error // ""')
+
+  echo
+  echo "=== Vulnerability Scan Report ==="
+  echo "Host:     $host"
+  echo "Type:     $scan_type"
+  echo "Time:     $ts"
+  echo "Status:   $([[ "$ok" == "true" ]] && echo OK || echo FAILED)"
+  [[ -n "$error" ]] && echo "Error:    $error"
+  [[ -n "$note" ]] && echo "Note:     $note"
+  echo
+
+  case "$scan_type" in
+    library_vulns)
+      local summary
+      summary=$(echo "$result" | jq -r '.summary // {}')
+      local total
+      total=$(echo "$summary" | jq -r '.total_packages // 0')
+      local vuln
+      vuln=$(echo "$summary" | jq -r '.vulnerable_packages // 0')
+      echo "Pending security updates: $vuln package(s) (from $total security repo updates)"
+      echo
+      local details
+      details=$(echo "$result" | jq -c '.details // [] | .[]')
+      if [[ -n "$details" ]]; then
+        printf "%-30s %-12s %-30s\n" "PACKAGE" "PRIORITY" "UPDATE"
+        printf "%-30s %-12s %-30s\n" "------" "--------" "------"
+        while IFS= read -r line; do
+          local name priority update
+          name=$(echo "$line" | jq -r '.name // "-"')
+          priority=$(echo "$line" | jq -r '.priority // "-"')
+          update=$(echo "$line" | jq -r '.update_available // "-"')
+          printf "%-30s %-12s %-30s\n" "$name" "$priority" "$update"
+        done <<< "$details"
+      fi
+      ;;
+    services)
+      echo "Services check completed. See JSON output for details."
+      ;;
+    docker)
+      echo "Docker check completed. See JSON output for details."
+      ;;
+    pm2)
+      echo "PM2 check completed. See JSON output for details."
+      ;;
+    full)
+      echo "Full scan completed. See JSON output for details."
+      ;;
+  esac
+  echo
+}
+
+# Output a result, either as JSON or human-readable depending on OUTPUT_JSON.
+output_result() {
+  local result="$1"
+  if [[ "$OUTPUT_JSON" == "1" ]]; then
+    echo "$result"
+  else
+    format_human "$result"
+  fi
+}
+
 # Check that jq is available.
 if ! command -v jq >/dev/null 2>&1; then
   echo '{"ok": false, "error": "jq is required but not installed"}' >&2
   exit 1
 fi
 
-# Run a single check by name and print its JSON result.
+# Run a single check by name and output its result.
 run_check() {
   local check="$1"
+  local result
   case "$check" in
-    services) check_services ;;
-    docker) check_docker ;;
-    pm2) check_pm2 ;;
-    library_vulns) check_libraries ;;
-    *) error_result "unknown" "Unknown check: $check" ;;
+    services) result=$(check_services) ;;
+    docker) result=$(check_docker) ;;
+    pm2) result=$(check_pm2) ;;
+    library_vulns) result=$(check_libraries) ;;
+    *) result=$(error_result "unknown" "Unknown check: $check") ;;
   esac
+  output_result "$result"
 }
 
 run_full_scan() {
@@ -171,7 +252,7 @@ run_full_scan() {
     }')
 
   rm -rf "$tmpdir" "$progress_dir"
-  echo "$result"
+  output_result "$result"
 }
 
 show_menu() {
@@ -205,18 +286,28 @@ show_menu() {
 # Parse CLI flags.
 if [[ $# -eq 0 ]]; then
   show_menu
-else
-  case "$1" in
-    --services) run_check services ;;
-    --docker) run_check docker ;;
-    --pm2) run_check pm2 ;;
-    --library-vulns) run_check library_vulns ;;
-    --full) run_full_scan ;;
-    --help|-h) print_help ;;
-    *)
-      echo '{"ok": false, "error": "Unknown option: '"$1"'"}' >&2
-      print_help >&2
-      exit 1
-      ;;
-  esac
+  exit 0
 fi
+
+# Handle global flags first.
+for arg in "$@"; do
+  case "$arg" in
+    --json) OUTPUT_JSON=1 ;;
+    --help|-h) print_help; exit 0 ;;
+  esac
+done
+
+# Run the requested check.
+case "$1" in
+  --services) run_check services ;;
+  --docker) run_check docker ;;
+  --pm2) run_check pm2 ;;
+  --library-vulns) run_check library_vulns ;;
+  --full) run_full_scan ;;
+  --json) ;;
+  *)
+    echo '{"ok": false, "error": "Unknown option: '"$1"'"}' >&2
+    print_help >&2
+    exit 1
+    ;;
+esac

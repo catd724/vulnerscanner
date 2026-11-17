@@ -85,6 +85,10 @@ export default function VulnScanner() {
   const clearScans = useStore((s) => s.clearScans);
   const toast = useStore((s) => s.toast);
   const aiEnabled = useStore((s) => s.settings?.aiEnabled);
+  const setNav = useStore((s) => s.setNav);
+  const addAiMessage = useStore((s) => s.addAiMessage);
+  const setAiBusyGlobal = useStore((s) => s.setAiBusy);
+  const getActivePaneContext = useStore((s) => s.getActivePaneContext);
 
   const [scriptUrl, setScriptUrl] = useState(() => {
     try {
@@ -95,6 +99,8 @@ export default function VulnScanner() {
   });
   const [running, setRunning] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
+  const [scanHistoryPage, setScanHistoryPage] = useState(1);
+  const SCAN_HISTORY_PAGE_SIZE = 10;
 
   // Persist script URL preference.
   useEffect(() => {
@@ -173,44 +179,57 @@ export default function VulnScanner() {
       toast('Enable AI features in the sidebar first', 'error');
       return;
     }
+
+    // Build context from the scan result and recent terminal output.
+    const scanContext = JSON.stringify(activeScan.result, null, 2).slice(0, 3000);
+    const terminalContext = getActivePaneContext().slice(0, 3000);
+    const context = [scanContext, terminalContext].filter(Boolean).join('\n\n--- Terminal output ---\n\n');
+
+    const userText = `Analyze this ${activeScan.typeLabel} scan for ${activeScan.host}.`;
+
+    // Add user message to the AI chat and switch to the AI tab.
+    addAiMessage({
+      role: 'user',
+      mode: 'vuln-analyze',
+      content: userText,
+      context,
+    });
+    setNav('ai');
     setAiBusy(true);
+    setAiBusyGlobal(true);
+
     try {
       const response = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mode: 'vuln-analyze',
-          context: JSON.stringify(activeScan.result, null, 2).slice(0, 6000),
+          query: userText,
+          context,
         }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'AI request failed');
 
-      const analysisScan = {
-        id: uid(),
-        type: 'ai_analysis',
-        typeLabel: 'AI Analysis',
-        host: activeScan.host,
-        sessionId: activeScan.sessionId,
-        paneId: activeScan.paneId,
-        timestamp: new Date().toISOString(),
-        parentScanId: activeScan.id,
-        result: {
-          scan_type: 'ai_analysis',
-          timestamp: new Date().toISOString(),
-          host: activeScan.host,
-          ok: true,
-          analysis: data.analysis,
-        },
-      };
-      addScan(analysisScan);
-      toast('AI analysis complete', 'success');
+      addAiMessage({
+        role: 'assistant',
+        mode: 'vuln-analyze',
+        content: data.analysis || '',
+        analysis: data.analysis,
+        model: data.model,
+      });
     } catch (err) {
+      addAiMessage({
+        role: 'assistant',
+        mode: 'vuln-analyze',
+        content: `Analysis failed: ${err.message}`,
+      });
       toast(err.message, 'error');
     } finally {
       setAiBusy(false);
+      setAiBusyGlobal(false);
     }
-  }, [activeScan, aiEnabled, addScan, toast]);
+  }, [activeScan, aiEnabled, addAiMessage, setNav, setAiBusyGlobal, getActivePaneContext, toast]);
 
   const copyCommand = useCallback(
     (type) => {
@@ -313,51 +332,79 @@ export default function VulnScanner() {
           )}
 
           {scans.length > 0 && (
-            <div className="vuln-history">
-              {scans.map((scan) => {
-                const counts = countVulns(scan.result);
-                const isActive = activeScan?.id === scan.id;
-                const date = new Date(scan.timestamp).toLocaleString();
-                return (
+            <>
+              <div className="vuln-history">
+                {scans
+                  .slice(
+                    (scanHistoryPage - 1) * SCAN_HISTORY_PAGE_SIZE,
+                    scanHistoryPage * SCAN_HISTORY_PAGE_SIZE
+                  )
+                  .map((scan) => {
+                    const counts = countVulns(scan.result);
+                    const isActive = activeScan?.id === scan.id;
+                    const date = new Date(scan.timestamp).toLocaleString();
+                    return (
+                      <button
+                        key={scan.id}
+                        className={`vuln-history-item ${isActive ? 'is-active' : ''}`}
+                        onClick={() => setActiveScan(scan.id)}
+                      >
+                        <span className="vuln-history-title">{scan.typeLabel}</span>
+                        <span className="vuln-history-meta">{scan.host}</span>
+                        <span className="vuln-history-meta">{date}</span>
+                        <span className="vuln-history-badges">
+                          {counts.critical > 0 && (
+                            <span className="badge badge-critical">{counts.critical} C</span>
+                          )}
+                          {counts.high > 0 && (
+                            <span className="badge badge-high">{counts.high} H</span>
+                          )}
+                          {counts.medium > 0 && (
+                            <span className="badge badge-medium">{counts.medium} M</span>
+                          )}
+                          {counts.low > 0 && (
+                            <span className="badge badge-low">{counts.low} L</span>
+                          )}
+                          {!counts.critical && !counts.high && !counts.medium && !counts.low && (
+                            <span className="badge badge-ok">OK</span>
+                          )}
+                        </span>
+                        <span
+                          className="icon-btn vuln-history-delete"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteScan(scan.id);
+                          }}
+                          title="Delete scan"
+                        >
+                          <CloseIcon size={12} />
+                        </span>
+                      </button>
+                    );
+                  })}
+              </div>
+              {scans.length > SCAN_HISTORY_PAGE_SIZE && (
+                <div className="vuln-pagination">
                   <button
-                    key={scan.id}
-                    className={`vuln-history-item ${isActive ? 'is-active' : ''}`}
-                    onClick={() => setActiveScan(scan.id)}
+                    className="btn btn-ghost btn-sm"
+                    disabled={scanHistoryPage === 1}
+                    onClick={() => setScanHistoryPage((p) => Math.max(1, p - 1))}
                   >
-                    <span className="vuln-history-title">{scan.typeLabel}</span>
-                    <span className="vuln-history-meta">{scan.host}</span>
-                    <span className="vuln-history-meta">{date}</span>
-                    <span className="vuln-history-badges">
-                      {counts.critical > 0 && (
-                        <span className="badge badge-critical">{counts.critical} C</span>
-                      )}
-                      {counts.high > 0 && (
-                        <span className="badge badge-high">{counts.high} H</span>
-                      )}
-                      {counts.medium > 0 && (
-                        <span className="badge badge-medium">{counts.medium} M</span>
-                      )}
-                      {counts.low > 0 && (
-                        <span className="badge badge-low">{counts.low} L</span>
-                      )}
-                      {!counts.critical && !counts.high && !counts.medium && !counts.low && (
-                        <span className="badge badge-ok">OK</span>
-                      )}
-                    </span>
-                    <span
-                      className="icon-btn vuln-history-delete"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteScan(scan.id);
-                      }}
-                      title="Delete scan"
-                    >
-                      <CloseIcon size={12} />
-                    </span>
+                    Previous
                   </button>
-                );
-              })}
-            </div>
+                  <span className="vuln-pagination-info">
+                    Page {scanHistoryPage} of {Math.ceil(scans.length / SCAN_HISTORY_PAGE_SIZE)}
+                  </span>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    disabled={scanHistoryPage >= Math.ceil(scans.length / SCAN_HISTORY_PAGE_SIZE)}
+                    onClick={() => setScanHistoryPage((p) => p + 1)}
+                  >
+                    Next
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
 
