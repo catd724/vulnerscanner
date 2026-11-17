@@ -11,6 +11,7 @@ import {
   CloseIcon,
   RefreshIcon,
 } from './Icons';
+import MarkdownRenderer from './MarkdownRenderer';
 
 const SCAN_TYPES = [
   {
@@ -444,7 +445,7 @@ function ScanResultView({ scan }) {
   if (scan.type === 'ai_analysis') {
     return (
       <div className="vuln-ai-analysis">
-        <pre>{result.analysis}</pre>
+        <MarkdownRenderer>{result.analysis || ''}</MarkdownRenderer>
       </div>
     );
   }

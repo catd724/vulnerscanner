@@ -3444,16 +3444,52 @@ input[type='color'].input {
   font-size: var(--t-sm);
 }
 
+.vuln-ai-analysis {
+  padding: var(--s-3);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+.vuln-ai-analysis h1,
+.vuln-ai-analysis h2,
+.vuln-ai-analysis h3,
+.vuln-ai-analysis h4 {
+  margin-top: var(--s-3);
+  margin-bottom: var(--s-1);
+  color: var(--text-primary);
+}
+
+.vuln-ai-analysis p {
+  margin-bottom: var(--s-2);
+}
+
+.vuln-ai-analysis ul,
+.vuln-ai-analysis ol {
+  margin-bottom: var(--s-2);
+  padding-left: var(--s-4);
+}
+
+.vuln-ai-analysis li {
+  margin-bottom: var(--s-1);
+}
+
+.vuln-ai-analysis code {
+  font-family: var(--font-mono);
+  background: var(--ink-900);
+  padding: 1px 4px;
+  border-radius: 3px;
+}
+
 .vuln-ai-analysis pre {
   padding: var(--s-3);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
   background: var(--ink-900);
-  font-family: var(--font-sans);
-  font-size: var(--t-base);
-  color: var(--text-primary);
-  line-height: 1.6;
-  white-space: pre-wrap;
+  overflow-x: auto;
+  margin-bottom: var(--s-2);
 }
 
 @keyframes spin {
