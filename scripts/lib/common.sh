@@ -81,6 +81,13 @@ merge_result() {
   echo "$envelope" | jq --argjson details "$details" '. + $details'
 }
 
+# Same as merge_result but reads details from a file to avoid ARG_MAX limits.
+merge_result_file() {
+  local envelope="$1"
+  local details_file="$2"
+  echo "$envelope" | jq --slurpfile details "$details_file" '. + $details[0]'
+}
+
 # Output a simple JSON error result.
 error_result() {
   local scan_type="$1"

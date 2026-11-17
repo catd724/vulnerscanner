@@ -24,8 +24,9 @@ check_services() {
   while IFS= read -r line; do
     [[ -z "$line" ]] && continue
     local unit state
-    unit=$(echo "$line" | awk '{print $1}')
-    state=$(echo "$line" | awk '{print $3}')
+    # systemctl output: "● service.service loaded active running"
+    unit=$(echo "$line" | awk '{print $2}')
+    state=$(echo "$line" | awk '{print $5}')
     [[ -z "$unit" ]] && continue
 
     total=$((total + 1))

@@ -41,16 +41,23 @@ check_libraries() {
     return 0
   fi
 
-  # Zip packages with their OSV results.
+  # Zip packages with their OSV results. Use temp files to avoid ARG_MAX
+  # limits when passing large JSON arrays as jq arguments.
+  local pkg_file result_file
+  pkg_file=$(mktemp /tmp/vulnscan-pkgs.XXXXXX)
+  result_file=$(mktemp /tmp/vulnscan-osv.XXXXXX)
+  echo "$packages" > "$pkg_file"
+  echo "$batch_result" > "$result_file"
+
   local details
-  details=$(jq -n \
-    --argjson packages "$packages" \
-    --argjson results "$batch_result" \
+  details=$(jq \
+    --slurpfile packages "$pkg_file" \
+    --slurpfile results "$result_file" \
     --argjson max "$MAX_PACKAGES" \
     '[
-      range(0; ([($packages | length), $max] | min)) as $i |
-      $packages[$i] as $pkg |
-      ($results.results[$i].vulns // []) as $vulns |
+      range(0; ([($packages[0] | length), $max] | min)) as $i |
+      $packages[0][$i] as $pkg |
+      ($results[0].results[$i].vulns // []) as $vulns |
       {
         name: $pkg.name,
         version: $pkg.version,
@@ -66,6 +73,8 @@ check_libraries() {
         ]
       }
     ]')
+
+  rm -f "$pkg_file" "$result_file"
 
   # Count vulnerable packages and severities.
   local vulnerable critical high medium low unknown
@@ -87,6 +96,13 @@ check_libraries() {
     --argjson unknown "$unknown" \
     '{total_packages: $total, vulnerable_packages: $vulnerable, critical: $critical, high: $high, medium: $medium, low: $low, unknown: $unknown}')
 
-  merge_result "$envelope" \
-    "$(jq -n --argjson summary "$summary" --argjson details "$details" '{ok: true, summary: $summary, details: $details}')"
+  local detail_file
+  detail_file=$(mktemp /tmp/vulnscan-details.XXXXXX)
+  echo "$details" > "$detail_file"
+
+  jq --slurpfile details "$detail_file" --argjson summary "$summary" \
+    '. + {ok: true, summary: $summary, details: $details[0]}' \
+    <<< "$envelope"
+
+  rm -f "$detail_file"
 }
