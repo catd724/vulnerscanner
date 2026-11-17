@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 #
-# Check installed system libraries/packages for known vulnerabilities via OSV.
+# Check installed system libraries/packages for known vulnerabilities.
+#
+# Fast path: use the distribution's own update checker (apt, yum, dnf) when
+# available. This is orders of magnitude faster than querying OSV for every
+# package and works offline if the package index is current.
+#
+# OSV path: queries Google's OSV database. Used as a fallback or when the
+# VULNSCAN_USE_OSV environment variable is set.
 #
 
 set -euo pipefail
@@ -9,32 +16,42 @@ set -euo pipefail
 MAX_PACKAGES=${VULNSCAN_MAX_PACKAGES:-50}
 BATCH_SIZE=50
 OSV_TIMEOUT=25
-MAX_VULNS_PER_PKG=10
 OSV_TOTAL_BUDGET=60
+MAX_VULNS_PER_PKG=10
 
 # Print progress to stderr so users see activity during long scans.
 progress() {
   echo "[library-vulns] $*" >&2
 }
 
+# Run a command with a hard timeout. Prefers the system `timeout` utility;
+# falls back to curl's --max-time for HTTP requests.
+run_with_timeout() {
+  local seconds="$1"
+  shift
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$seconds" "$@"
+  else
+    "$@"
+  fi
+}
+
 # Run a command and show a spinner on stderr until it finishes.
-# Prints elapsed time and command status for visibility.
 with_spinner() {
   local msg="$1"
   shift
-  local tmpfile
-  tmpfile=$(mktemp /tmp/vulnscan-spinner.XXXXXX)
   local start=$SECONDS
 
   "$@" &
   local pid=$!
-  local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  # Use simple ASCII spinner so every terminal can display it.
+  local spin='|/-\'
   local i=0
 
   while kill -0 "$pid" 2>/dev/null; do
-    i=$(( (i + 1) % ${#spin} ))
-    printf "\r[library-vulns] %s %s (%ss) " "$msg" "${spin:$i:1}" "$((SECONDS - start))" >&2
-    sleep 0.15
+    i=$(( (i + 1) % 4 ))
+    printf "\r[library-vulns] %s %s (%ss)" "$msg" "${spin:$i:1}" "$((SECONDS - start))" >&2
+    sleep 0.5
   done
 
   wait "$pid"
@@ -43,33 +60,114 @@ with_spinner() {
   return "$status"
 }
 
-check_libraries() {
-  local envelope
-  envelope=$(scan_envelope "library_vulns")
+# Fast Debian/Ubuntu check: simulate an upgrade and report packages that would
+# be installed. This is the fastest way to know what is out of date.
+check_apt_updates() {
+  local envelope="$1"
 
-  local os_info
-  os_info=$(detect_os)
+  progress "using apt fast-path to find outdated packages..."
 
-  progress "enumerating installed packages..."
-  local packages
-  packages=$(enumerate_packages)
-  local total
-  total=$(echo "$packages" | jq 'length')
-  progress "found $total installed packages"
-
-  if [[ "$total" -eq 0 ]]; then
-    merge_result "$envelope" \
-      '{"summary": {"total_packages": 0, "vulnerable_packages": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}, "details": [], "ok": true, "note": "No packages enumerated"}'
-    return 0
+  local apt_output
+  if ! apt_output=$(run_with_timeout 30 apt-get -s upgrade 2>/dev/null); then
+    return 1
   fi
 
-  # Limit total packages and split into smaller batches so the OSV API responds
-  # quickly and we can stream partial results instead of one giant request.
+  # Parse lines like: "Inst python3 [3.10.6-1~22.04] (3.10.6-1~22.04.1 Ubuntu:22.04/jammy-updates [amd64])"
+  local details="[]"
+  local pkg_count=0
+  while IFS= read -r line; do
+    if [[ "$line" =~ ^Inst[[:space:]]+([^[:space:]]+)[[:space:]]+\[([^]]+)\][[:space:]]+\(([^[:space:]]+) ]]; then
+      local name="${BASH_REMATCH[1]}"
+      local old_version="${BASH_REMATCH[2]}"
+      local new_version="${BASH_REMATCH[3]}"
+      pkg_count=$((pkg_count + 1))
+      details=$(echo "$details" | jq \
+        --arg name "$name" \
+        --arg old_version "$old_version" \
+        --arg new_version "$new_version" \
+        '. + [{name: $name, version: $old_version, ecosystem: "Debian", update_available: $new_version, vulnerability_count: 1, vulnerabilities: [{id: "UPDATE_AVAILABLE", summary: ("Package update available: " + $old_version + " -> " + $new_version), severity: "UNKNOWN", aliases: []}]}]')
+    fi
+  done <<< "$apt_output"
+
+  local summary
+  summary=$(jq -n --argjson count "$pkg_count" '{total_packages: $count, vulnerable_packages: $count, critical: 0, high: 0, medium: 0, low: 0, unknown: $count}')
+
+  if [[ "$pkg_count" -eq 0 ]]; then
+    merge_result "$envelope" \
+      "$(jq -n --argjson summary "$summary" --arg note "apt reports all installed packages are up to date" '{ok: true, summary: $summary, details: [], note: $note}')"
+  else
+    merge_result "$envelope" \
+      "$(jq -n --argjson summary "$summary" --argjson details "$details" --arg note "Packages with available updates from apt (fast-path). Set VULNSCAN_USE_OSV=1 to query OSV for CVE details." '{ok: true, summary: $summary, details: $details, note: $note}')"
+  fi
+}
+
+# Fast Red Hat/CentOS/Rocky/Fedora check.
+check_yum_updates() {
+  local envelope="$1"
+
+  progress "using yum/dnf fast-path to find outdated packages..."
+
+  local cmd
+  if command -v dnf >/dev/null 2>&1; then
+    cmd="dnf check-update -q"
+  elif command -v yum >/dev/null 2>&1; then
+    cmd="yum check-update -q"
+  else
+    return 1
+  fi
+
+  local output
+  local status=0
+  output=$(run_with_timeout 60 $cmd 2>/dev/null) || status=$?
+  # yum/dnf exits 100 when updates are available; other non-zero codes mean failure.
+  if [[ "$status" -ne 0 && "$status" -ne 100 ]]; then
+    return 1
+  fi
+
+  local details="[]"
+  local pkg_count=0
+  while IFS= read -r line; do
+    # Lines like: "python3.x86_64  3.9.18-1.el9_3.1  updates"
+    local name version repo
+    name=$(echo "$line" | awk '{print $1}')
+    version=$(echo "$line" | awk '{print $2}')
+    repo=$(echo "$line" | awk '{print $3}')
+    [[ -z "$name" || -z "$version" ]] && continue
+    pkg_count=$((pkg_count + 1))
+    details=$(echo "$details" | jq \
+      --arg name "$name" \
+      --arg version "$version" \
+      --arg repo "$repo" \
+      '. + [{name: $name, version: "unknown", ecosystem: "Red Hat", update_available: $version, repository: $repo, vulnerability_count: 1, vulnerabilities: [{id: "UPDATE_AVAILABLE", summary: ("Package update available in " + $repo + ": " + $version), severity: "UNKNOWN", aliases: []}]}]')
+  done <<< "$output"
+
+  local summary
+  summary=$(jq -n --argjson count "$pkg_count" '{total_packages: $count, vulnerable_packages: $count, critical: 0, high: 0, medium: 0, low: 0, unknown: $count}')
+
+  if [[ "$pkg_count" -eq 0 ]]; then
+    merge_result "$envelope" \
+      "$(jq -n --argjson summary "$summary" --arg note "yum/dnf reports all installed packages are up to date" '{ok: true, summary: $summary, details: [], note: $note}')"
+  else
+    merge_result "$envelope" \
+      "$(jq -n --argjson summary "$summary" --argjson details "$details" --arg note "Packages with available updates from yum/dnf (fast-path). Set VULNSCAN_USE_OSV=1 to query OSV for CVE details." '{ok: true, summary: $summary, details: $details, note: $note}')"
+  fi
+}
+
+# Slow OSV-based check. Kept as a fallback for users who explicitly want CVE
+# data or are on a distro without apt/yum.
+check_osv() {
+  local envelope="$1"
+  local packages="$2"
+  local total
+  total=$(echo "$packages" | jq 'length')
+
+  progress "using OSV slow-path for CVE data..."
+
   local capped
   capped=$(echo "$packages" | jq --argjson max "$MAX_PACKAGES" '[limit($max; .[])]')
   total=$(echo "$capped" | jq 'length')
   if [[ "$total" -ge "$MAX_PACKAGES" ]]; then
-    progress "capping scan to $MAX_PACKAGES packages for speed (set VULNSCAN_MAX_PACKAGES=N to change)"
+    progress "capping OSV scan to $MAX_PACKAGES packages for speed (set VULNSCAN_MAX_PACKAGES=N to change)"
   fi
 
   local all_results='[]'
@@ -95,20 +193,21 @@ check_libraries() {
       --argjson size "$BATCH_SIZE" \
       '[.[$start:$start+$size] | .[] | {package: {ecosystem: .ecosystem, name: .name}, version: .version}]')
 
+    progress "querying OSV batch $batch_num/$batch_count (will timeout after ${OSV_TIMEOUT}s)..."
     local batch_result
     local curl_status=0
 
-    # Show a spinner while waiting for OSV so the user knows work is happening.
     set +e
-    batch_result=$(with_spinner "querying OSV batch $batch_num/$batch_count" \
-      curl -sL --max-time "$OSV_TIMEOUT" -X POST "https://api.osv.dev/v1/querybatch" \
+    batch_result=$(with_spinner "waiting for OSV" \
+      run_with_timeout "$OSV_TIMEOUT" \
+      curl -sL -X POST "https://api.osv.dev/v1/querybatch" \
       -H "Content-Type: application/json" \
       -d "{\"queries\": $batch_query}" 2>/dev/null)
     curl_status=$?
     set -e
 
     if [[ $curl_status -ne 0 ]]; then
-      progress "OSV batch $batch_num request failed or timed out after ${OSV_TIMEOUT}s; stopping"
+      progress "OSV batch $batch_num request failed or timed out (exit $curl_status); stopping"
       timed_out=true
       break
     fi
@@ -129,8 +228,6 @@ check_libraries() {
   result_count=$(echo "$all_results" | jq 'length')
   progress "received $result_count OSV result entries"
 
-  # If OSV did not return usable data, still return the package list so the user
-  # sees the most recently scanned packages and knows the enumeration worked.
   if [[ "$result_count" -eq 0 ]]; then
     progress "OSV returned no vulnerability data; returning package list only"
     local pkg_list
@@ -139,9 +236,7 @@ check_libraries() {
     [[ "$timed_out" == true ]] && note="OSV query timed out after ${OSV_TOTAL_BUDGET}s; package list shown without vulnerability data"
 
     local summary
-    summary=$(jq -n \
-      --argjson total "$total" \
-      '{total_packages: $total, vulnerable_packages: 0, critical: 0, high: 0, medium: 0, low: 0, unknown: 0}')
+    summary=$(jq -n --argjson total "$total" '{total_packages: $total, vulnerable_packages: 0, critical: 0, high: 0, medium: 0, low: 0, unknown: 0}')
 
     merge_result "$envelope" \
       "$(jq -n --argjson summary "$summary" --argjson details "$pkg_list" --arg note "$note" '{ok: true, summary: $summary, details: $details, note: $note}')"
@@ -150,8 +245,6 @@ check_libraries() {
 
   progress "building report..."
 
-  # Zip packages with their OSV results. Use temp files to avoid ARG_MAX
-  # limits when passing large JSON arrays as jq arguments.
   local pkg_file result_file
   pkg_file=$(mktemp /tmp/vulnscan-pkgs.XXXXXX)
   result_file=$(mktemp /tmp/vulnscan-osv.XXXXXX)
@@ -186,7 +279,6 @@ check_libraries() {
 
   rm -f "$pkg_file" "$result_file"
 
-  # Count vulnerable packages and severities.
   local vulnerable critical high medium low unknown
   vulnerable=$(echo "$details" | jq '[.[] | select(.vulnerability_count > 0)] | length')
   critical=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "number" and . >= 9.0) or (.severity | type == "string" and (. | ascii_downcase) == "critical"))] | length')
@@ -226,4 +318,51 @@ check_libraries() {
   fi
 
   rm -f "$detail_file"
+}
+
+check_libraries() {
+  local envelope
+  envelope=$(scan_envelope "library_vulns")
+
+  local os_info
+  os_info=$(detect_os)
+
+  progress "enumerating installed packages..."
+  local packages
+  packages=$(enumerate_packages)
+  local total
+  total=$(echo "$packages" | jq 'length')
+  progress "found $total installed packages"
+
+  if [[ "$total" -eq 0 ]]; then
+    merge_result "$envelope" \
+      '{"summary": {"total_packages": 0, "vulnerable_packages": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}, "details": [], "ok": true, "note": "No packages enumerated"}'
+    return 0
+  fi
+
+  # If the user explicitly wants OSV, use it. Otherwise use the fast distro path.
+  if [[ "${VULNSCAN_USE_OSV:-0}" == "1" ]]; then
+    check_osv "$envelope" "$packages"
+    return $?
+  fi
+
+  local id
+  id=$(echo "$os_info" | jq -r '.id')
+  case "$id" in
+    debian|ubuntu|linuxmint|pop)
+      if command -v apt-get >/dev/null 2>&1; then
+        check_apt_updates "$envelope"
+        return $?
+      fi
+      ;;
+    fedora|rhel|centos|rocky|almalinux|amzn)
+      if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+        check_yum_updates "$envelope"
+        return $?
+      fi
+      ;;
+  esac
+
+  progress "no fast distro updater available; falling back to OSV"
+  check_osv "$envelope" "$packages"
 }

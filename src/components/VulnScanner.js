@@ -451,6 +451,9 @@ function ScanResultView({ scan }) {
                 <div className="vuln-package-header">
                   <span className="vuln-package-name">{pkg.name}</span>
                   <span className="vuln-package-version">{pkg.version}</span>
+                  {pkg.update_available && (
+                    <span className="vuln-package-version">→ {pkg.update_available}</span>
+                  )}
                   <span className="vuln-package-eco">{pkg.ecosystem}</span>
                 </div>
                 <div className="vuln-cves">
