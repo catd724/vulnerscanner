@@ -219,6 +219,26 @@ export default function VulnScanner() {
         analysis: data.analysis,
         model: data.model,
       });
+
+      // Also save the analysis as a scan entry so it appears on the scanner page.
+      addScan({
+        id: uid(),
+        type: 'ai_analysis',
+        typeLabel: 'AI Analysis',
+        host: activeScan.host,
+        sessionId: activeScan.sessionId,
+        paneId: activeScan.paneId,
+        timestamp: new Date().toISOString(),
+        parentScanId: activeScan.id,
+        result: {
+          scan_type: 'ai_analysis',
+          timestamp: new Date().toISOString(),
+          host: activeScan.host,
+          ok: true,
+          analysis: data.analysis,
+        },
+      });
+      toast('AI analysis complete', 'success');
     } catch (err) {
       addAiMessage({
         role: 'assistant',
@@ -230,7 +250,7 @@ export default function VulnScanner() {
       setAiBusy(false);
       setAiBusyGlobal(false);
     }
-  }, [activeScan, aiEnabled, addAiMessage, setNav, setAiBusyGlobal, getActivePaneContext, toast]);
+  }, [activeScan, aiEnabled, addAiMessage, addScan, setNav, setAiBusyGlobal, getActivePaneContext, toast]);
 
   const copyCommand = useCallback(
     (type) => {
