@@ -126,89 +126,43 @@ export default function VulnScanner() {
         return;
       }
       if (scriptUrl.includes('<your-org>')) {
-        toast('Set the script GitHub URL in the Scanner panel first', 'error');
+        toast('Set the script URL in the Scanner panel first', 'error');
         return;
       }
 
       setRunning(type.key);
-      const scanId = uid();
-      const remotePath = `/tmp/vulnscan-${scanId}.json`;
-      const scriptPath = `/tmp/vulnscan-${scanId}.sh`;
 
-      const command = `curl -sL "${scriptUrl}" -o "${scriptPath}" && bash "${scriptPath}" ${type.flag} > "${remotePath}" 2>&1\n`;
+      // Run via process substitution so nothing is written to disk on the target server.
+      const command = `bash <(curl -sL "${scriptUrl}") ${type.flag}\n`;
 
-      // Send command to the active terminal pane.
       send('shell:input', {
         sessionId: activeSession.sessionId,
         paneId: activeSession.paneId,
         data: command,
       });
 
-      // Poll the remote result file.
-      let result = null;
-      let attempts = 0;
-      const maxAttempts = 60;
-      const delay = 2000;
+      // The scan output streams directly to the terminal. Nothing is saved on the server.
+      setTimeout(() => setRunning(null), 1500);
 
-      while (attempts < maxAttempts) {
-        await new Promise((r) => setTimeout(r, delay));
-        try {
-          const file = await fetch(
-            `/api/sftp/file?sessionId=${encodeURIComponent(
-              activeSession.sessionId
-            )}&path=${encodeURIComponent(remotePath)}`
-          );
-          if (!file.ok) {
-            attempts++;
-            continue;
-          }
-          const data = await file.json();
-          if (!data.content) {
-            attempts++;
-            continue;
-          }
-          result = data.content;
-          break;
-        } catch {
-          attempts++;
-        }
-      }
-
-      setRunning(null);
-
-      if (!result) {
-        toast('Scan did not produce a result file in time', 'error');
-        return;
-      }
-
-      let parsed;
-      try {
-        parsed = JSON.parse(result);
-      } catch {
-        toast('Scan result is not valid JSON', 'error');
-        parsed = {
-          scan_type: type.key,
-          timestamp: new Date().toISOString(),
-          host: activeSession.label,
-          ok: false,
-          error: 'Invalid JSON output',
-          raw: result,
-        };
-      }
-
-      const scan = {
-        id: scanId,
+      // Keep a lightweight history entry so the user knows a scan was launched.
+      addScan({
+        id: uid(),
         type: type.key,
         typeLabel: type.label,
         host: activeSession.label,
         sessionId: activeSession.sessionId,
         paneId: activeSession.paneId,
         timestamp: new Date().toISOString(),
-        result: parsed,
-      };
+        result: {
+          scan_type: type.key,
+          timestamp: new Date().toISOString(),
+          host: activeSession.label,
+          ok: true,
+          note: 'Output streamed to terminal. Nothing saved on the remote server.',
+        },
+      });
 
-      addScan(scan);
-      toast('Scan completed', 'success');
+      toast('Scan command sent to terminal', 'success');
     },
     [activeSession, scriptUrl, addScan, toast]
   );
@@ -261,7 +215,7 @@ export default function VulnScanner() {
   const copyCommand = useCallback(
     (type) => {
       if (scriptUrl.includes('<your-org>')) {
-        toast('Set the script GitHub URL first', 'error');
+        toast('Set the script URL first', 'error');
         return;
       }
       const cmd = `bash <(curl -sL "${scriptUrl}") ${type.flag}`;
@@ -444,6 +398,17 @@ function ScanResultView({ scan }) {
     return (
       <div className="vuln-ai-analysis">
         <pre>{result.analysis}</pre>
+      </div>
+    );
+  }
+
+  if (result.note) {
+    return (
+      <div className="vuln-note">
+        <p>{result.note}</p>
+        <p className="vuln-hint">
+          Switch to the active terminal pane to see the full scan output.
+        </p>
       </div>
     );
   }

@@ -17,29 +17,46 @@
 
 set -euo pipefail
 
-# Resolve the directory that holds this script so sourced modules work when
-# executed remotely via process substitution as well as locally.
+# Resolve the directory that holds this script. When run via process
+# substitution (bash <(curl ...)) BASH_SOURCE points to /dev/fd/NN, so local
+# lib files are unavailable; in that case we fetch them from the remote repo.
+REMOTE_BASE="${VULNSCAN_REPO:-https://raw.githubusercontent.com/catd724/vulnerscanner/refs/heads/main/scripts}"
+
 if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
-  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null || true)"
 else
-  SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+  SCRIPT_DIR=""
+fi
+
+# If lib files are missing (process substitution or incomplete copy), download them.
+if [[ -z "$SCRIPT_DIR" ]] || [[ ! -f "$SCRIPT_DIR/lib/common.sh" ]]; then
+  TEMP_DIR="$(mktemp -d /tmp/vulnscan-libs.XXXXXX)"
+  trap 'rm -rf "$TEMP_DIR"' EXIT
+  SCRIPT_DIR="$TEMP_DIR"
+
+  for lib in common.sh osv_api.sh package_enum.sh service_check.sh docker_check.sh pm2_check.sh library_check.sh; do
+    if ! curl -fsSL --max-time 20 "$REMOTE_BASE/lib/$lib" -o "$SCRIPT_DIR/$lib" 2>/dev/null; then
+      echo "{\"ok\": false, \"error\": \"Failed to download required module: $lib from $REMOTE_BASE/lib/$lib\"}" >&2
+      exit 1
+    fi
+  done
 fi
 
 # Source helpers.
 # shellcheck source=lib/common.sh
-. "$SCRIPT_DIR/lib/common.sh"
+. "$SCRIPT_DIR/common.sh"
 # shellcheck source=lib/osv_api.sh
-. "$SCRIPT_DIR/lib/osv_api.sh"
+. "$SCRIPT_DIR/osv_api.sh"
 # shellcheck source=lib/package_enum.sh
-. "$SCRIPT_DIR/lib/package_enum.sh"
+. "$SCRIPT_DIR/package_enum.sh"
 # shellcheck source=lib/service_check.sh
-. "$SCRIPT_DIR/lib/service_check.sh"
+. "$SCRIPT_DIR/service_check.sh"
 # shellcheck source=lib/docker_check.sh
-. "$SCRIPT_DIR/lib/docker_check.sh"
+. "$SCRIPT_DIR/docker_check.sh"
 # shellcheck source=lib/pm2_check.sh
-. "$SCRIPT_DIR/lib/pm2_check.sh"
+. "$SCRIPT_DIR/pm2_check.sh"
 # shellcheck source=lib/library_check.sh
-. "$SCRIPT_DIR/lib/library_check.sh"
+. "$SCRIPT_DIR/library_check.sh"
 
 print_help() {
   cat <<'EOF'

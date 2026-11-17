@@ -3385,6 +3385,14 @@ input[type='color'].input {
   color: #ffc4d2;
 }
 
+.vuln-note {
+  padding: var(--s-3);
+  border: 1px solid var(--border-focus);
+  border-radius: var(--radius-sm);
+  background: rgba(0, 242, 254, 0.07);
+  color: var(--text-primary);
+}
+
 .vuln-raw {
   padding: var(--s-3);
   border: 1px solid var(--border-color);
