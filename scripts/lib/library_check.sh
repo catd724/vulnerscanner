@@ -257,69 +257,37 @@ check_apt_updates() {
     return 0
   fi
 
-  progress "querying OSV for severity data on $filtered_count must-update packages..."
-  local osv_response
-  osv_response=$(query_osv_batch "$filtered")
-
+  # Build the report. We trust apt's security repository: if a package has a
+  # pending update in jammy-security, it addresses a vulnerability. We do NOT
+  # query OSV here by default because OSV's Debian data often returns old CVEs
+  # that are already patched in the installed Ubuntu revision, which is
+  # misleading. CVE details are available on demand with VULNSCAN_USE_OSV=1.
   local details
   details=$(echo "$filtered" | jq \
-    --argjson osv "$osv_response" \
-    --argjson max_vulns "$MAX_VULNS_PER_PKG" \
-    '
-    def max_cvss:
-      [ (.severity // [])[] | select(.type == "CVSS_V3" or .type == "CVSS_V4") | (.score | try tonumber catch null) ] | max // null;
-    def severity_label(score):
-      if score == null then "UNKNOWN"
-      elif score >= 9.0 then "CRITICAL"
-      elif score >= 7.0 then "HIGH"
-      elif score >= 4.0 then "MEDIUM"
-      else "LOW"
-      end;
-    [ to_entries | .[] |
-      .key as $idx |
-      .value as $pkg |
-      ($osv.results[$idx].vulns // []) as $vulns |
-      {
-        name: $pkg.name,
-        version: $pkg.version,
-        ecosystem: $pkg.ecosystem,
-        priority: $pkg.priority,
-        update_available: $pkg.update_available,
-        repository: $pkg.repository,
-        vulnerability_count: ($vulns | length),
-        vulnerabilities: [
-          ($vulns | limit($max_vulns; .[])) | {
-            id: .id,
-            summary: (.summary // .details // "No summary"),
-            severity: (severity_label(max_cvss)),
-            cvss_score: max_cvss,
-            aliases: (.aliases // [])
-          }
-        ]
-      }
-    ]')
-
-  local vulnerable critical high medium low unknown
-  vulnerable=$(echo "$details" | jq '[.[] | select(.vulnerability_count > 0)] | length')
-  critical=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "critical"))] | length')
-  high=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "high"))] | length')
-  medium=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "medium"))] | length')
-  low=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "low"))] | length')
-  unknown=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "unknown") or .severity == null)] | length')
+    --arg reason "Pending security update from apt" \
+    '[.[] | {
+      name: .name,
+      version: .version,
+      ecosystem: .ecosystem,
+      priority: .priority,
+      update_available: .update_available,
+      repository: .repository,
+      vulnerability_count: 1,
+      vulnerabilities: [{
+        id: "SECURITY_UPDATE",
+        summary: ($reason + ": " + .version + " -> " + .update_available),
+        severity: "UNKNOWN",
+        aliases: []
+      }]
+    }]')
 
   local summary
   summary=$(jq -n \
     --argjson total "$total_candidates" \
-    --argjson vulnerable "$vulnerable" \
-    --argjson critical "$critical" \
-    --argjson high "$high" \
-    --argjson medium "$medium" \
-    --argjson low "$low" \
-    --argjson unknown "$unknown" \
-    '{total_packages: $total, vulnerable_packages: $vulnerable, critical: $critical, high: $high, medium: $medium, low: $low, unknown: $unknown}')
+    --argjson count "$filtered_count" \
+    '{total_packages: $total, vulnerable_packages: $count, critical: 0, high: 0, medium: 0, low: 0, unknown: $count}')
 
-  local note="Security updates for must-update packages (priority >= $MIN_PRIORITY)."
-  [[ "$vulnerable" -eq 0 ]] && note="$note OSV had no CVE data for these packages, but they are security updates and should be applied."
+  local note="Security updates for must-update packages (priority >= $MIN_PRIORITY). CVE details are omitted by default because OSV's Debian data frequently lists historical CVEs already patched in the installed Ubuntu revision."
 
   merge_result "$envelope" \
     "$(jq -n --argjson summary "$summary" --argjson details "$details" --arg note "$note" '{ok: true, summary: $summary, details: $details, note: $note}')"
@@ -394,68 +362,34 @@ check_yum_updates() {
   local skipped_count=$((pkg_count - filtered_count))
   [[ "$skipped_count" -gt 0 ]] && progress "skipped $skipped_count server-irrelevant packages"
 
-  progress "querying OSV for severity data on $filtered_count packages..."
-  local osv_response
-  osv_response=$(query_osv_batch "$filtered")
-
+  # Build the report without querying OSV by default. yum/dnf --security is the
+  # authoritative source; OSV's RPM data can include CVEs already patched in the
+  # installed release. CVE details are available via the OSV slow path.
   local details
   details=$(echo "$filtered" | jq \
-    --argjson osv "$osv_response" \
-    --argjson max_vulns "$MAX_VULNS_PER_PKG" \
-    '
-    def max_cvss:
-      [ (.severity // [])[] | select(.type == "CVSS_V3" or .type == "CVSS_V4") | (.score | try tonumber catch null) ] | max // null;
-    def severity_label(score):
-      if score == null then "UNKNOWN"
-      elif score >= 9.0 then "CRITICAL"
-      elif score >= 7.0 then "HIGH"
-      elif score >= 4.0 then "MEDIUM"
-      else "LOW"
-      end;
-    [ to_entries | .[] |
-      .key as $idx |
-      .value as $pkg |
-      ($osv.results[$idx].vulns // []) as $vulns |
-      {
-        name: $pkg.name,
-        version: $pkg.version,
-        ecosystem: $pkg.ecosystem,
-        update_available: $pkg.update_available,
-        repository: $pkg.repository,
-        vulnerability_count: ($vulns | length),
-        vulnerabilities: [
-          ($vulns | limit($max_vulns; .[])) | {
-            id: .id,
-            summary: (.summary // .details // "No summary"),
-            severity: (severity_label(max_cvss)),
-            cvss_score: max_cvss,
-            aliases: (.aliases // [])
-          }
-        ]
-      }
-    ]')
-
-  local vulnerable critical high medium low unknown
-  vulnerable=$(echo "$details" | jq '[.[] | select(.vulnerability_count > 0)] | length')
-  critical=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "critical"))] | length')
-  high=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "high"))] | length')
-  medium=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "medium"))] | length')
-  low=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "low"))] | length')
-  unknown=$(echo "$details" | jq '[.[].vulnerabilities[]? | select((.severity | type == "string" and (. | ascii_downcase) == "unknown") or .severity == null)] | length')
+    --arg reason "Pending security update from yum/dnf" \
+    '[.[] | {
+      name: .name,
+      version: .version,
+      ecosystem: .ecosystem,
+      update_available: .update_available,
+      repository: .repository,
+      vulnerability_count: 1,
+      vulnerabilities: [{
+        id: "SECURITY_UPDATE",
+        summary: ($reason + ": " + .version + " -> " + .update_available),
+        severity: "UNKNOWN",
+        aliases: []
+      }]
+    }]')
 
   local summary
   summary=$(jq -n \
     --argjson total "$pkg_count" \
-    --argjson vulnerable "$vulnerable" \
-    --argjson critical "$critical" \
-    --argjson high "$high" \
-    --argjson medium "$medium" \
-    --argjson low "$low" \
-    --argjson unknown "$unknown" \
-    '{total_packages: $total, vulnerable_packages: $vulnerable, critical: $critical, high: $high, medium: $medium, low: $low, unknown: $unknown}')
+    --argjson count "$filtered_count" \
+    '{total_packages: $total, vulnerable_packages: $count, critical: 0, high: 0, medium: 0, low: 0, unknown: $count}')
 
-  local note="Security updates available from yum/dnf."
-  [[ "$vulnerable" -eq 0 ]] && note="$note OSV had no CVE data for these packages, but they are security updates and should be applied."
+  local note="Security updates available from yum/dnf. CVE details are omitted by default because OSV data frequently lists historical CVEs already patched in the installed release."
 
   merge_result "$envelope" \
     "$(jq -n --argjson summary "$summary" --argjson details "$details" --arg note "$note" '{ok: true, summary: $summary, details: $details, note: $note}')"
