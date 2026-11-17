@@ -34,12 +34,25 @@ if [[ -z "$SCRIPT_DIR" ]] || [[ ! -f "$SCRIPT_DIR/lib/common.sh" ]]; then
   trap 'rm -rf "$TEMP_DIR"' EXIT
   SCRIPT_DIR="$TEMP_DIR"
 
-  for lib in common.sh osv_api.sh package_enum.sh service_check.sh docker_check.sh pm2_check.sh library_check.sh; do
-    if ! curl -fsSL --max-time 20 "$REMOTE_BASE/lib/$lib" -o "$SCRIPT_DIR/$lib" 2>/dev/null; then
-      echo "{\"ok\": false, \"error\": \"Failed to download required module: $lib from $REMOTE_BASE/lib/$lib\"}" >&2
+  echo "[vulnscan] downloading scanner modules from $REMOTE_BASE ..." >&2
+  libs=(common.sh osv_api.sh package_enum.sh service_check.sh docker_check.sh pm2_check.sh library_check.sh)
+  pids=()
+  for lib in "${libs[@]}"; do
+    (
+      if ! curl -fsSL --max-time 15 "$REMOTE_BASE/lib/$lib" -o "$SCRIPT_DIR/$lib" 2>/dev/null; then
+        echo "{\"ok\": false, \"error\": \"Failed to download required module: $lib from $REMOTE_BASE/lib/$lib\"}" >&2
+        exit 1
+      fi
+    ) &
+    pids+=($!)
+  done
+
+  for pid in "${pids[@]}"; do
+    if ! wait "$pid"; then
       exit 1
     fi
   done
+  echo "[vulnscan] modules ready" >&2
 fi
 
 # Source helpers.
@@ -101,12 +114,14 @@ run_full_scan() {
   local tmpdir
   tmpdir=$(mktemp -d /tmp/vulnscan-full.XXXXXX)
 
+  echo "[full] running services, docker, pm2 and library checks in parallel..." >&2
   # Run independent checks in parallel to keep the full scan fast.
   check_services > "$tmpdir/services.json" &
   check_docker > "$tmpdir/docker.json" &
   check_pm2 > "$tmpdir/pm2.json" &
   check_libraries > "$tmpdir/libraries.json" &
   wait
+  echo "[full] collecting results..." >&2
 
   local result
   result=$(jq -n \

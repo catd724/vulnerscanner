@@ -146,6 +146,8 @@ check_docker() {
     idx=$((idx + 1))
   done
 
+  progress "done ($vulnerable vulnerable images found)"
+
   local summary
   summary=$(jq -n \
     --argjson containers "$(echo "$containers" | jq 'length')" \
