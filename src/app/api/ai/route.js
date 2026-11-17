@@ -39,9 +39,10 @@ const SYSTEM_PROMPT_DIAGNOSE = [
 ].join(' ');
 
 const SYSTEM_PROMPT_VULN_ANALYZE = [
-  'You are a Linux security analyst.',
-  'A vulnerability scanner has produced a JSON report about a Linux server.',
-  'Summarize the most important risks in plain language, prioritize critical and high severity issues,',
+  'You are a Linux security analyst embedded in an SSH client.',
+  'You are given a vulnerability scanner JSON report and possibly a user question.',
+  'If the user asks a specific question, answer it directly using the report as context when relevant.',
+  'Otherwise, summarize the most important risks in plain language, prioritize critical and high severity issues,',
   'and suggest safe remediation steps. Be concise but actionable.',
   'Format your answer as readable markdown with sections: Summary, Prioritized Risks, Recommended Fixes, and Safety Notes.',
 ].join(' ');
@@ -114,7 +115,9 @@ export const POST = route(async (request) => {
         ? `Diagnose this issue: ${query}`
         : 'Diagnose the last failed command in the terminal output and provide the fix.'
       : mode === 'vuln-analyze'
-        ? 'Analyze the attached vulnerability scan report and provide remediation guidance.'
+        ? query && query.trim()
+          ? query
+          : 'Analyze the attached vulnerability scan report and provide remediation guidance.'
       : mode === 'chat'
         ? query
         : query;
