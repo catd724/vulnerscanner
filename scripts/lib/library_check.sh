@@ -100,20 +100,31 @@ check_apt_updates() {
     return 1
   fi
 
-  # Parse lines like: "Inst python3 [3.10.6-1~22.04] (3.10.6-1~22.04.1 Ubuntu:22.04/jammy-updates [amd64])"
+  # Parse lines like: "Inst python3 [3.10.6-1~22.04] (3.10.6-1~22.04.1 Ubuntu:22.04/jammy-security [amd64])"
+  # We only care about packages coming from a security repository.
+  local apt_re='^Inst[[:space:]]+([^[:space:]]+)[[:space:]]+\[([^]]+)\][[:space:]]+\(([^)]+)\)'
   local details="[]"
   local pkg_count=0
   while IFS= read -r line; do
-    if [[ "$line" =~ ^Inst[[:space:]]+([^[:space:]]+)[[:space:]]+\[([^]]+)\][[:space:]]+\(([^[:space:]]+) ]]; then
+    if [[ "$line" =~ $apt_re ]]; then
       local name="${BASH_REMATCH[1]}"
       local old_version="${BASH_REMATCH[2]}"
-      local new_version="${BASH_REMATCH[3]}"
+      local inner="${BASH_REMATCH[3]}"
+      local new_version="${inner%% *}"
+      local repo_info="${inner#* }"
+
+      # Only flag packages from a security repository.
+      if [[ "$repo_info" != *security* && "$repo_info" != *Security* ]]; then
+        continue
+      fi
+
       pkg_count=$((pkg_count + 1))
       details=$(echo "$details" | jq \
         --arg name "$name" \
         --arg old_version "$old_version" \
         --arg new_version "$new_version" \
-        '. + [{name: $name, version: $old_version, ecosystem: "Debian", update_available: $new_version, vulnerability_count: 1, vulnerabilities: [{id: "UPDATE_AVAILABLE", summary: ("Package update available: " + $old_version + " -> " + $new_version), severity: "UNKNOWN", aliases: []}]}]')
+        --arg repo "$repo_info" \
+        '. + [{name: $name, version: $old_version, ecosystem: "Debian", update_available: $new_version, repository: $repo, vulnerability_count: 1, vulnerabilities: [{id: "SECURITY_UPDATE", summary: ("Security update available: " + $old_version + " -> " + $new_version + " (" + $repo + ")"), severity: "UNKNOWN", aliases: []}]}]')
     fi
   done <<< "$apt_output"
 
@@ -122,10 +133,10 @@ check_apt_updates() {
 
   if [[ "$pkg_count" -eq 0 ]]; then
     merge_result "$envelope" \
-      "$(jq -n --argjson summary "$summary" --arg note "apt reports all installed packages are up to date" '{ok: true, summary: $summary, details: [], note: $note}')"
+      "$(jq -n --argjson summary "$summary" --arg note "apt reports no pending security updates" '{ok: true, summary: $summary, details: [], note: $note}')"
   else
     merge_result "$envelope" \
-      "$(jq -n --argjson summary "$summary" --argjson details "$details" --arg note "Packages with available updates from apt (fast-path). Set VULNSCAN_USE_OSV=1 to query OSV for CVE details." '{ok: true, summary: $summary, details: $details, note: $note}')"
+      "$(jq -n --argjson summary "$summary" --argjson details "$details" --arg note "Security updates available from apt. Set VULNSCAN_USE_OSV=1 to query OSV for CVE details." '{ok: true, summary: $summary, details: $details, note: $note}')"
   fi
 }
 
@@ -137,9 +148,17 @@ check_yum_updates() {
 
   local cmd
   if command -v dnf >/dev/null 2>&1; then
-    cmd="dnf check-update -q"
+    if dnf --help 2>/dev/null | grep -q -- '--security'; then
+      cmd="dnf --security check-update -q"
+    else
+      cmd="dnf check-update -q"
+    fi
   elif command -v yum >/dev/null 2>&1; then
-    cmd="yum check-update -q"
+    if yum --help 2>/dev/null | grep -q -- '--security'; then
+      cmd="yum --security check-update -q"
+    else
+      cmd="yum check-update -q"
+    fi
   else
     return 1
   fi
@@ -174,10 +193,10 @@ check_yum_updates() {
 
   if [[ "$pkg_count" -eq 0 ]]; then
     merge_result "$envelope" \
-      "$(jq -n --argjson summary "$summary" --arg note "yum/dnf reports all installed packages are up to date" '{ok: true, summary: $summary, details: [], note: $note}')"
+      "$(jq -n --argjson summary "$summary" --arg note "yum/dnf reports no pending security updates" '{ok: true, summary: $summary, details: [], note: $note}')"
   else
     merge_result "$envelope" \
-      "$(jq -n --argjson summary "$summary" --argjson details "$details" --arg note "Packages with available updates from yum/dnf (fast-path). Set VULNSCAN_USE_OSV=1 to query OSV for CVE details." '{ok: true, summary: $summary, details: $details, note: $note}')"
+      "$(jq -n --argjson summary "$summary" --argjson details "$details" --arg note "Security updates available from yum/dnf. Set VULNSCAN_USE_OSV=1 to query OSV for CVE details." '{ok: true, summary: $summary, details: $details, note: $note}')"
   fi
 }
 
