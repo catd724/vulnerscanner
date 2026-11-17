@@ -6,6 +6,10 @@
 set -euo pipefail
 
 # Limit how many images we deeply inspect to keep runtime reasonable.
+
+progress() {
+  echo "[docker] $*" >&2
+}
 MAX_IMAGES=10
 BATCH_SIZE=25
 OSV_TIMEOUT=30
@@ -61,6 +65,7 @@ enumerate_image_packages() {
 check_docker() {
   local envelope
   envelope=$(scan_envelope "docker")
+  progress "checking docker daemon..."
 
   if ! command -v docker >/dev/null 2>&1; then
     merge_result "$envelope" \
@@ -77,6 +82,7 @@ check_docker() {
   local containers images
   containers=$(docker ps -a --format '{{json .}}' 2>/dev/null | jq -s '.' || echo '[]')
   images=$(docker images --format '{{json .}}' 2>/dev/null | jq -s '.' || echo '[]')
+  progress "found $(echo "$images" | jq 'length') images, scanning up to $MAX_IMAGES"
 
   local image_count
   image_count=$(echo "$images" | jq 'length')
@@ -91,6 +97,7 @@ check_docker() {
     local image_obj image_id
     image_obj=$(echo "$images" | jq ".[$idx]")
     image_id=$(echo "$image_obj" | jq -r '.ID')
+    progress "inspecting image $((idx + 1))/$image_count ($image_id)..."
 
     local pkgs
     pkgs=$(enumerate_image_packages "$image_id")
