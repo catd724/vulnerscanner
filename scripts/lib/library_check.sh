@@ -24,6 +24,34 @@ progress() {
   echo "[library-vulns] $*" >&2
 }
 
+# Draw a percentage bar on stderr.
+# Usage: progress_bar current total [label]
+progress_bar() {
+  local current="$1"
+  local total="$2"
+  local label="${3:-}"
+  local width=30
+  local pct=0
+  if [[ "$total" -gt 0 ]]; then
+    pct=$(( current * 100 / total ))
+  fi
+  local filled=$(( current * width / total ))
+  local empty=$(( width - filled ))
+  local bar=""
+  for ((i = 0; i < filled; i++)); do bar+="="; done
+  for ((i = 0; i < empty; i++)); do bar+="-"; done
+  if [[ -n "$label" ]]; then
+    printf "\r[library-vulns] [%s] %3d%% %s" "$bar" "$pct" "$label" >&2
+  else
+    printf "\r[library-vulns] [%s] %3d%%" "$bar" "$pct" >&2
+  fi
+}
+
+# Clear the current progress bar line.
+progress_bar_done() {
+  printf "\r%-80s\r" "" >&2
+}
+
 # Run a command with a hard timeout. Prefers the system `timeout` utility;
 # falls back to curl's --max-time for HTTP requests.
 run_with_timeout() {
@@ -68,7 +96,7 @@ check_apt_updates() {
   progress "using apt fast-path to find outdated packages..."
 
   local apt_output
-  if ! apt_output=$(run_with_timeout 30 apt-get -s upgrade 2>/dev/null); then
+  if ! apt_output=$(with_spinner "waiting for apt" run_with_timeout 30 apt-get -s upgrade 2>/dev/null); then
     return 1
   fi
 
@@ -177,23 +205,24 @@ check_osv() {
   local osv_start=$SECONDS
   local timed_out=false
 
+  progress_bar 0 "$batch_count" "OSV batch 0/$batch_count"
   while [[ $start -lt $total ]]; do
     batch_num=$((batch_num + 1))
 
     if [[ $((SECONDS - osv_start)) -ge $OSV_TOTAL_BUDGET ]]; then
+      progress_bar_done
       progress "OSV total time budget (${OSV_TOTAL_BUDGET}s) reached; stopping with partial results"
       timed_out=true
       break
     fi
 
-    progress "preparing OSV batch $batch_num/$batch_count (${BATCH_SIZE} packages)..."
     local batch_query
     batch_query=$(echo "$capped" | jq \
       --argjson start "$start" \
       --argjson size "$BATCH_SIZE" \
       '[.[$start:$start+$size] | .[] | {package: {ecosystem: .ecosystem, name: .name}, version: .version}]')
 
-    progress "querying OSV batch $batch_num/$batch_count (will timeout after ${OSV_TIMEOUT}s)..."
+    progress_bar "$((batch_num - 1))" "$batch_count" "OSV batch $batch_num/$batch_count (timeout ${OSV_TIMEOUT}s)"
     local batch_result
     local curl_status=0
 
@@ -207,12 +236,14 @@ check_osv() {
     set -e
 
     if [[ $curl_status -ne 0 ]]; then
+      progress_bar_done
       progress "OSV batch $batch_num request failed or timed out (exit $curl_status); stopping"
       timed_out=true
       break
     fi
 
     if [[ -z "$batch_result" ]] || ! echo "$batch_result" | jq -e . >/dev/null 2>&1; then
+      progress_bar_done
       progress "OSV batch $batch_num returned invalid JSON; stopping"
       timed_out=true
       break
@@ -221,8 +252,10 @@ check_osv() {
     all_results=$(jq --slurpfile prev <(echo "$all_results") --slurpfile cur <(echo "$batch_result") \
       '($prev[0] // []) + ($cur[0].results // [])')
 
+    progress_bar "$batch_num" "$batch_count" "OSV batch $batch_num/$batch_count done"
     start=$((start + BATCH_SIZE))
   done
+  progress_bar_done
 
   local result_count
   result_count=$(echo "$all_results" | jq 'length')

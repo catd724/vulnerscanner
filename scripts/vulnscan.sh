@@ -115,11 +115,42 @@ run_full_scan() {
   tmpdir=$(mktemp -d /tmp/vulnscan-full.XXXXXX)
 
   echo "[full] running services, docker, pm2 and library checks in parallel..." >&2
+
+  # Progress tracking: each job touches a marker file when it finishes.
+  local progress_dir
+  progress_dir=$(mktemp -d /tmp/vulnscan-progress.XXXXXX)
+  touch "$progress_dir/services" "$progress_dir/docker" "$progress_dir/pm2" "$progress_dir/libraries"
+
+  run_check_with_marker() {
+    local name="$1"
+    local marker="$2"
+    local out="$3"
+    shift 3
+    "$@" > "$out"
+    touch "$progress_dir/$marker.done"
+  }
+
   # Run independent checks in parallel to keep the full scan fast.
-  check_services > "$tmpdir/services.json" &
-  check_docker > "$tmpdir/docker.json" &
-  check_pm2 > "$tmpdir/pm2.json" &
-  check_libraries > "$tmpdir/libraries.json" &
+  run_check_with_marker services services "$tmpdir/services.json" check_services &
+  run_check_with_marker docker docker "$tmpdir/docker.json" check_docker &
+  run_check_with_marker pm2 pm2 "$tmpdir/pm2.json" check_pm2 &
+  run_check_with_marker libraries libraries "$tmpdir/libraries.json" check_libraries &
+
+  # Show a progress bar while the four checks run.
+  local total=4
+  local completed=0
+  while [[ $completed -lt $total ]]; do
+    completed=$(find "$progress_dir" -name '*.done' | wc -l)
+    local pct=$((completed * 100 / total))
+    local filled=$((completed * 30 / total))
+    local empty=$((30 - filled))
+    local bar=""
+    for ((i = 0; i < filled; i++)); do bar+="="; done
+    for ((i = 0; i < empty; i++)); do bar+="-"; done
+    printf "\r[full] [%s] %3d%% (%s/%s checks complete)" "$bar" "$pct" "$completed" "$total" >&2
+    sleep 0.5
+  done
+  printf "\n" >&2
   wait
   echo "[full] collecting results..." >&2
 
@@ -139,7 +170,7 @@ run_full_scan() {
       results: {services: $services[0], docker: $docker[0], pm2: $pm2[0], libraries: $libraries[0]}
     }')
 
-  rm -rf "$tmpdir"
+  rm -rf "$tmpdir" "$progress_dir"
   echo "$result"
 }
 
