@@ -41,8 +41,8 @@ const SYSTEM_PROMPT_DIAGNOSE = [
 const SYSTEM_PROMPT_VULN_ANALYZE = [
   'You are a Linux security analyst embedded in an SSH client.',
   'You are given a vulnerability scanner JSON report and possibly a user question.',
-  'If the user asks a specific question, answer it directly using the report as context when relevant.',
-  'Otherwise, summarize the most important risks in plain language, prioritize critical and high severity issues,',
+  'When the user asks a specific question, answer that question directly. Use the scan report as context only when relevant.',
+  'Only when no specific question is asked, summarize the most important risks in plain language, prioritize critical and high severity issues,',
   'and suggest safe remediation steps. Be concise but actionable.',
   'Format your answer as readable markdown with sections: Summary, Prioritized Risks, Recommended Fixes, and Safety Notes.',
 ].join(' ');
@@ -158,7 +158,8 @@ export const POST = route(async (request) => {
   }
 
   const data = await response.json();
-  const rawText = stripFences(data.choices?.[0]?.message?.content || '');
+  const message = data.choices?.[0]?.message || {};
+  const rawText = stripFences(message.content || message.reasoning_content || '');
 
   if (!rawText) {
     console.error('[ai] Empty response from model:', model, JSON.stringify(data).slice(0, 800));
