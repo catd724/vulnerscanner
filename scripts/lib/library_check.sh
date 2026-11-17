@@ -6,7 +6,10 @@
 set -euo pipefail
 
 # Cap packages scanned to keep runtime reasonable.
-MAX_PACKAGES=200
+MAX_PACKAGES=100
+BATCH_SIZE=50
+OSV_TIMEOUT=30
+MAX_VULNS_PER_PKG=10
 
 check_libraries() {
   local envelope
@@ -26,18 +29,46 @@ check_libraries() {
     return 0
   fi
 
-  # Build batch query (limit to MAX_PACKAGES).
-  local batch_query
-  batch_query=$(echo "$packages" | jq --argjson max "$MAX_PACKAGES" '[limit($max; .[] | {package: {ecosystem: .ecosystem, name: .name}, version: .version})]')
+  # Limit total packages and split into smaller batches so the OSV API responds
+  # quickly and we can stream partial results instead of one giant request.
+  local capped
+  capped=$(echo "$packages" | jq --argjson max "$MAX_PACKAGES" '[limit($max; .[])]')
+  total=$(echo "$capped" | jq 'length')
 
-  local batch_result
-  batch_result=$(curl -sL --max-time 60 -X POST "https://api.osv.dev/v1/querybatch" \
-    -H "Content-Type: application/json" \
-    -d "{\"queries\": $batch_query}" 2>/dev/null || echo '{"results": []}')
+  local all_results='[]'
+  local start=0
+  local batch_num=0
+  while [[ $start -lt $total ]]; do
+    batch_num=$((batch_num + 1))
+    local batch_query
+    batch_query=$(echo "$capped" | jq \
+      --argjson start "$start" \
+      --argjson size "$BATCH_SIZE" \
+      '[.[$start:$start+$size] | .[] | {package: {ecosystem: .ecosystem, name: .name}, version: .version}]')
 
-  if ! echo "$batch_result" | jq -e . >/dev/null 2>&1; then
+    local batch_result
+    # Use a separate curl invocation per batch so a slow batch cannot block
+    # the whole scan indefinitely.
+    set +e
+    batch_result=$(curl -sL --max-time "$OSV_TIMEOUT" -X POST "https://api.osv.dev/v1/querybatch" \
+      -H "Content-Type: application/json" \
+      -d "{\"queries\": $batch_query}" 2>/dev/null)
+    set -e
+
+    if [[ -z "$batch_result" ]] || ! echo "$batch_result" | jq -e . >/dev/null 2>&1; then
+      # Stop early but still return whatever we have so far.
+      break
+    fi
+
+    all_results=$(jq --slurpfile prev <(echo "$all_results") --slurpfile cur <(echo "$batch_result") \
+      '($prev[0] // []) + ($cur[0].results // [])')
+
+    start=$((start + BATCH_SIZE))
+  done
+
+  if [[ $(echo "$all_results" | jq 'length') -eq 0 ]]; then
     merge_result "$envelope" \
-      '{"summary": {"total_packages": 0, "vulnerable_packages": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}, "details": [], "ok": false, "error": "OSV batch query returned invalid JSON"}'
+      '{"summary": {"total_packages": '$total', "vulnerable_packages": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}, "details": [], "ok": false, "error": "OSV query failed or returned no results"}'
     return 0
   fi
 
@@ -46,14 +77,15 @@ check_libraries() {
   local pkg_file result_file
   pkg_file=$(mktemp /tmp/vulnscan-pkgs.XXXXXX)
   result_file=$(mktemp /tmp/vulnscan-osv.XXXXXX)
-  echo "$packages" > "$pkg_file"
-  echo "$batch_result" > "$result_file"
+  echo "$capped" > "$pkg_file"
+  echo "{\"results\": $all_results}" > "$result_file"
 
   local details
   details=$(jq \
     --slurpfile packages "$pkg_file" \
     --slurpfile results "$result_file" \
     --argjson max "$MAX_PACKAGES" \
+    --argjson max_vulns "$MAX_VULNS_PER_PKG" \
     '[
       range(0; ([($packages[0] | length), $max] | min)) as $i |
       $packages[0][$i] as $pkg |
@@ -64,7 +96,7 @@ check_libraries() {
         ecosystem: $pkg.ecosystem,
         vulnerability_count: ($vulns | length),
         vulnerabilities: [
-          $vulns[] | {
+          ($vulns | limit($max_vulns; .[])) | {
             id: .id,
             summary: (.summary // .details // "No summary"),
             severity: ((.severity // []) | if length > 0 then .[0].score else "UNKNOWN" end),

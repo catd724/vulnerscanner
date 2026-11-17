@@ -98,26 +98,34 @@ run_check() {
 }
 
 run_full_scan() {
-  local services docker pm2 libraries
-  services=$(check_services)
-  docker=$(check_docker)
-  pm2=$(check_pm2)
-  libraries=$(check_libraries)
+  local tmpdir
+  tmpdir=$(mktemp -d /tmp/vulnscan-full.XXXXXX)
 
-  jq -n \
+  # Run independent checks in parallel to keep the full scan fast.
+  check_services > "$tmpdir/services.json" &
+  check_docker > "$tmpdir/docker.json" &
+  check_pm2 > "$tmpdir/pm2.json" &
+  check_libraries > "$tmpdir/libraries.json" &
+  wait
+
+  local result
+  result=$(jq -n \
     --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg host "$(hostname 2>/dev/null || echo unknown)" \
-    --argjson services "$services" \
-    --argjson docker "$docker" \
-    --argjson pm2 "$pm2" \
-    --argjson libraries "$libraries" \
+    --slurpfile services "$tmpdir/services.json" \
+    --slurpfile docker "$tmpdir/docker.json" \
+    --slurpfile pm2 "$tmpdir/pm2.json" \
+    --slurpfile libraries "$tmpdir/libraries.json" \
     '{
       scan_type: "full",
       timestamp: $timestamp,
       host: $host,
       ok: true,
-      results: {services: $services, docker: $docker, pm2: $pm2, libraries: $libraries}
-    }'
+      results: {services: $services[0], docker: $docker[0], pm2: $pm2[0], libraries: $libraries[0]}
+    }')
+
+  rm -rf "$tmpdir"
+  echo "$result"
 }
 
 show_menu() {

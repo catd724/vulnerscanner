@@ -5,6 +5,7 @@ import { useStore } from '@/lib/store';
 import { UI_THEMES } from '@/lib/themes';
 import Brand from './Brand';
 import VulnScanner from './VulnScanner';
+import AiSidebar from './AiSidebar';
 import { Address, StatusDot } from './Address';
 import {
   HostsIcon,
@@ -21,6 +22,7 @@ import {
   FolderPlusIcon,
   ChevronIcon,
   SparkIcon,
+  AiIcon,
   OsBadge,
 } from './Icons';
 
@@ -37,6 +39,7 @@ import {
 const NAV_ITEMS = [
   { key: 'hosts', label: 'Hosts', title: 'Hosts', Icon: HostsIcon },
   { key: 'scanner', label: 'Scanner', title: 'Vulnerability scanner', Icon: ScannerIcon },
+  { key: 'ai', label: 'AI', title: 'AI assistant', Icon: AiIcon },
   { key: 'snippets', label: 'Snippets', title: 'Snippets', Icon: SnippetsIcon },
   { key: 'tunnels', label: 'Tunnels', title: 'Port forwarding', Icon: TunnelsIcon },
   { key: 'keychain', label: 'Keychain', title: 'Keychain (stored credentials)', Icon: KeychainIcon },
@@ -454,6 +457,10 @@ function SidePanel({ nav }) {
 
   if (nav === 'scanner') {
     return <VulnScanner />;
+  }
+
+  if (nav === 'ai') {
+    return <AiSidebar />;
   }
 
   const del = async (path, id, label) => {

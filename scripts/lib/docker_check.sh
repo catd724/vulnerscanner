@@ -5,58 +5,49 @@
 
 set -euo pipefail
 
-# Determine the package manager command to run inside a container based on OS hints.
-image_pkg_command() {
-  local image="$1"
-  # Probe the image with a minimal command.
-  if docker run --rm "$image" sh -c 'command -v dpkg-query' >/dev/null 2>&1; then
-    echo "dpkg-query -W -f='{{Package}}\\t{{Version}}\\n' 2>/dev/null || true"
-    return 0
-  fi
-  if docker run --rm "$image" sh -c 'command -v rpm' >/dev/null 2>&1; then
-    echo "rpm -qa --queryformat '%{NAME}\\t%{VERSION}-%{RELEASE}\\n' 2>/dev/null || true"
-    return 0
-  fi
-  if docker run --rm "$image" sh -c 'command -v apk' >/dev/null 2>&1; then
-    echo "apk list -I 2>/dev/null | awk '{full=\$1; name=full; sub(/-[0-9].*\$/, \"\", name); version=full; sub(\"^\"name\"-\", \"\", version); printf \"%s\\t%s\\n\", name, version}' || true"
-    return 0
-  fi
-  return 1
-}
+# Limit how many images we deeply inspect to keep runtime reasonable.
+MAX_IMAGES=10
+BATCH_SIZE=25
+OSV_TIMEOUT=30
 
-# List packages inside a Docker image as JSON array {name, version, ecosystem}.
+# Run a single command inside the image that detects the package manager and
+# lists packages. This avoids the previous 3+ container startups per image.
 enumerate_image_packages() {
   local image="$1"
-  local cmd
-  if ! cmd=$(image_pkg_command "$image"); then
-    echo '[]'
-    return 0
-  fi
 
   local raw
-  if ! raw=$(docker run --rm "$image" sh -c "$cmd" 2>/dev/null); then
-    echo '[]'
-    return 0
-  fi
-
-  # Detect ecosystem from the image itself.
-  local ecosystem="Linux"
-  if docker run --rm "$image" sh -c 'command -v dpkg-query' >/dev/null 2>&1; then
-    ecosystem="Debian"
-  elif docker run --rm "$image" sh -c 'command -v rpm' >/dev/null 2>&1; then
-    if docker run --rm "$image" sh -c 'test -f /etc/redhat-release' >/dev/null 2>&1; then
-      ecosystem="Red Hat"
+  raw=$(docker run --rm "$image" sh -c '
+    if command -v dpkg-query >/dev/null 2>&1; then
+      echo "ECO:Debian"
+      dpkg-query -W -f="${Package}\t${Version}\n" 2>/dev/null || true
+    elif command -v rpm >/dev/null 2>&1; then
+      if test -f /etc/redhat-release; then
+        echo "ECO:Red Hat"
+      else
+        echo "ECO:openSUSE"
+      fi
+      rpm -qa --queryformat "%{NAME}\t%{VERSION}-%{RELEASE}\n" 2>/dev/null || true
+    elif command -v apk >/dev/null 2>&1; then
+      echo "ECO:Alpine"
+      apk list -I 2>/dev/null | while read -r full _; do
+        name=${full%%-[0-9]*}
+        version=${full#$name-}
+        printf "%s\t%s\n" "$name" "$version"
+      done || true
     else
-      ecosystem="openSUSE"
+      echo "ECO:Linux"
     fi
-  elif docker run --rm "$image" sh -c 'command -v apk' >/dev/null 2>&1; then
-    ecosystem="Alpine"
-  fi
+  ' 2>/dev/null)
 
-  # Parse tab-separated lines into JSON.
+  local ecosystem="Linux"
   local jsonl=""
-  while IFS=$'\t' read -r name version _; do
-    [[ -z "$name" || -z "$version" ]] && continue
+  while IFS=$'\t' read -r name version; do
+    [[ -z "$name" ]] && continue
+    if [[ "$name" == "ECO:"* ]]; then
+      ecosystem="${name#ECO:}"
+      continue
+    fi
+    [[ -z "$version" ]] && continue
     jsonl+="{\"name\":\"$name\",\"version\":\"$version\",\"ecosystem\":\"$ecosystem\"}"
   done <<< "$raw"
 
@@ -90,29 +81,47 @@ check_docker() {
   local image_count
   image_count=$(echo "$images" | jq 'length')
 
-  # Check each image for vulnerabilities.
+  # Check each image for vulnerabilities, but cap the number inspected.
   local image_details="[]"
   local vulnerable=0
   local idx=0
+  local inspected=0
 
-  while [[ $idx -lt $image_count ]]; do
+  while [[ $idx -lt $image_count && $inspected -lt $MAX_IMAGES ]]; do
     local image_obj image_id
     image_obj=$(echo "$images" | jq ".[$idx]")
     image_id=$(echo "$image_obj" | jq -r '.ID')
 
     local pkgs
     pkgs=$(enumerate_image_packages "$image_id")
+    inspected=$((inspected + 1))
 
-    # Batch query OSV for up to 50 packages to keep runtime reasonable.
-    local batch_query batch_result vuln_list
-    batch_query=$(echo "$pkgs" | jq -s '[limit(50; .[] | {package: {ecosystem: .ecosystem, name: .name}, version: .version})]')
-    if [[ $(echo "$batch_query" | jq 'length') -gt 0 ]]; then
-      batch_result=$(curl -sL --max-time 30 -X POST "https://api.osv.dev/v1/querybatch" \
-        -H "Content-Type: application/json" \
-        -d "{\"queries\": $batch_query}" 2>/dev/null || echo '{"results": []}')
-      vuln_list=$(echo "$batch_result" | jq '[.results[]? | select(.vulns) | .vulns[]? | {id: .id, summary: (.summary // .details // "No summary"), severity: ((.severity // []) | if length > 0 then .[0].score else "UNKNOWN" end)}]')
-    else
-      vuln_list='[]'
+    # Batch query OSV in smaller chunks to keep each request fast.
+    local vuln_list='[]'
+    local pkg_total
+    pkg_total=$(echo "$pkgs" | jq 'length')
+    if [[ "$pkg_total" -gt 0 ]]; then
+      local start=0
+      while [[ $start -lt $pkg_total ]]; do
+        local batch_query batch_result
+        batch_query=$(echo "$pkgs" | jq \
+          --argjson start "$start" \
+          --argjson size "$BATCH_SIZE" \
+          '[.[$start:$start+$size] | .[] | {package: {ecosystem: .ecosystem, name: .name}, version: .version}]')
+
+        set +e
+        batch_result=$(curl -sL --max-time "$OSV_TIMEOUT" -X POST "https://api.osv.dev/v1/querybatch" \
+          -H "Content-Type: application/json" \
+          -d "{\"queries\": $batch_query}" 2>/dev/null)
+        set -e
+
+        if [[ -n "$batch_result" ]] && echo "$batch_result" | jq -e . >/dev/null 2>&1; then
+          vuln_list=$(jq --slurpfile prev <(echo "$vuln_list") --slurpfile cur <(echo "$batch_result") \
+            '($prev[0] // []) + [($cur[0].results // [])[] | select(.vulns) | .vulns[]? | {id: .id, summary: (.summary // .details // "No summary"), severity: ((.severity // []) | if length > 0 then .[0].score else "UNKNOWN" end)}]')
+        fi
+
+        start=$((start + BATCH_SIZE))
+      done
     fi
 
     local img_vuln_count
@@ -124,7 +133,7 @@ check_docker() {
     image_details=$(echo "$image_details" | jq \
       --argjson img "$image_obj" \
       --argjson vulns "$vuln_list" \
-      --argjson pkg_count "$(echo "$pkgs" | jq 'length')" \
+      --argjson pkg_count "$pkg_total" \
       '. + [$img + {packages_scanned: $pkg_count, vulnerabilities: $vulns}]')
 
     idx=$((idx + 1))

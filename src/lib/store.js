@@ -118,6 +118,10 @@ export const useStore = create((set, get) => ({
   scans: [],
   activeScanId: null,
 
+  // AI sidebar
+  aiMessages: [],
+  aiBusy: false,
+
   // Sessions and tabs
   sessions: {},
   tabs: [],
@@ -232,6 +236,90 @@ export const useStore = create((set, get) => ({
 
   setActiveScan(id) {
     set({ activeScanId: id });
+  },
+
+  /* --- AI assistant ----------------------------------------------------- */
+
+  addAiMessage(message) {
+    set((s) => ({
+      aiMessages: [
+        ...s.aiMessages,
+        {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          timestamp: Date.now(),
+          ...message,
+        },
+      ],
+    }));
+  },
+
+  clearAiMessages() {
+    set({ aiMessages: [] });
+  },
+
+  setAiBusy(aiBusy) {
+    set({ aiBusy });
+  },
+
+  getActivePaneContext() {
+    const state = get();
+    const tab = state.tabs.find((t) => t.id === state.activeTabId);
+    if (!tab) return '';
+
+    // Find the xterm instance for the active pane. TerminalPane registers its
+    // serializer on a ref exposed via a lightweight DOM attribute so the
+    // sidebar can read recent scrollback without coupling to React internals.
+    const paneId = tab.activePaneId;
+    const container = document.querySelector(`[data-pane-id="${paneId}"].pane-xterm`);
+    if (!container) return '';
+
+    // Prefer the real xterm buffer if the pane exposed it.
+    const term = container.__xterm;
+    if (term) {
+      try {
+        const buffer = term.buffer.active;
+        const lines = [];
+        for (let i = Math.max(0, buffer.length - 40); i < buffer.length; i++) {
+          const line = buffer.getLine(i);
+          if (line) lines.push(line.translateToString(true));
+        }
+        return lines.join('\n').trim();
+      } catch {
+        /* fall through to DOM scraping */
+      }
+    }
+
+    // Fallback: scrape the rendered xterm DOM rows.
+    try {
+      const screen = container.querySelector('.xterm-screen');
+      if (!screen) return '';
+      const rows = screen.querySelectorAll('.xterm-rows > div');
+      const lines = [];
+      const start = Math.max(0, rows.length - 40);
+      for (let i = start; i < rows.length; i++) {
+        const text = rows[i]?.textContent || '';
+        if (text) lines.push(text);
+      }
+      return lines.join('\n').trim();
+    } catch {
+      return '';
+    }
+  },
+
+  sendToActivePane(data) {
+    const state = get();
+    const tab = state.tabs.find((t) => t.id === state.activeTabId);
+    if (!tab) {
+      get().toast('No active terminal pane', 'error');
+      return;
+    }
+    const paneId = tab.activePaneId;
+    const pane = tab.panes[paneId];
+    if (!pane?.sessionId) {
+      get().toast('Active pane is not connected', 'error');
+      return;
+    }
+    send('shell:input', { sessionId: pane.sessionId, paneId, data });
   },
 
   /* --- vault ------------------------------------------------------------ */

@@ -46,17 +46,13 @@ export default function TerminalPane({ tabId, pane, host, isActive, onFocus }) {
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
-  const [aiOpen, setAiOpen] = useState(false);
-  const [aiMode, setAiMode] = useState('command'); // 'command' | 'diagnose'
-  const [aiQuery, setAiQuery] = useState('');
-  const [aiBusy, setAiBusy] = useState(false);
-  const [aiError, setAiError] = useState(null);
-  const [diagResult, setDiagResult] = useState(null);
-  const [shareContext, setShareContext] = useState(true);
 
   const toast = useStore((s) => s.toast);
   const closePane = useStore((s) => s.closePane);
   const aiEnabled = useStore((s) => s.settings?.aiEnabled);
+  const setNav = useStore((s) => s.setNav);
+  const addAiMessage = useStore((s) => s.addAiMessage);
+  const getActivePaneContext = useStore((s) => s.getActivePaneContext);
 
   const themeName = host?.theme || DEFAULT_THEME;
   const fontSize = host?.fontSize || 14;
@@ -94,6 +90,9 @@ export default function TerminalPane({ tabId, pane, host, isActive, onFocus }) {
     term.unicode.activeVersion = '11';
 
     term.open(containerRef.current);
+
+    // Expose the xterm instance so the AI sidebar can read real scrollback.
+    containerRef.current.__xterm = term;
 
     // WebGL is a large win on fast-scrolling output but is unavailable in some
     // GPU/driver combinations; fall back silently rather than failing to render.
@@ -151,6 +150,7 @@ export default function TerminalPane({ tabId, pane, host, isActive, onFocus }) {
       unsubscribe();
       dataDisposable.dispose();
       binaryDisposable.dispose();
+      if (containerRef.current) containerRef.current.__xterm = null;
       term.dispose();
       termRef.current = null;
       fitRef.current = null;
@@ -202,56 +202,21 @@ export default function TerminalPane({ tabId, pane, host, isActive, onFocus }) {
 
   /* --- ai ---------------------------------------------------------------- */
 
-  const askAi = useCallback(
-    async (overrideMode) => {
-      const mode = overrideMode || aiMode;
-      if (mode === 'command' && !aiQuery.trim()) return;
-      if (aiBusy) return;
-
-      setAiBusy(true);
-      setAiError(null);
-      setDiagResult(null);
-
-      let context = '';
-      if (shareContext && termRef.current) {
-        try {
-          const buffer = termRef.current.buffer.active;
-          const lines = [];
-          for (let i = Math.max(0, buffer.length - 60); i < buffer.length; i++) {
-            const line = buffer.getLine(i);
-            if (line) lines.push(line.translateToString(true));
-          }
-          context = lines.join('\n').trim();
-        } catch {
-          context = '';
-        }
-      }
-
-      try {
-        const response = await fetch('/api/ai', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ query: aiQuery, context, mode }),
+  const openAiSidebar = useCallback(
+    (mode = 'chat') => {
+      setNav('ai');
+      const context = getActivePaneContext();
+      if (context) {
+        addAiMessage({
+          role: 'user',
+          mode,
+          content: mode === 'diagnose' ? 'Diagnose this terminal output' : 'Analyze this terminal output',
+          context,
+          autoSend: true,
         });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || 'Request failed');
-
-        if (mode === 'diagnose') {
-          setDiagResult(data);
-        } else {
-          // Insert at the prompt without a trailing newline: the user presses Enter.
-          send('shell:input', { sessionId, paneId, data: data.command });
-          setAiOpen(false);
-          setAiQuery('');
-          termRef.current?.focus();
-        }
-      } catch (err) {
-        setAiError(err.message);
-      } finally {
-        setAiBusy(false);
       }
     },
-    [aiQuery, aiBusy, aiMode, shareContext, sessionId, paneId]
+    [setNav, addAiMessage, getActivePaneContext]
   );
 
   /* --- pane-level shortcuts ---------------------------------------------- */
@@ -266,12 +231,10 @@ export default function TerminalPane({ tabId, pane, host, isActive, onFocus }) {
       setSearchOpen((open) => !open);
     } else if (key === 'i' && aiEnabled) {
       event.preventDefault();
-      setAiMode('command');
-      setAiOpen((open) => !open);
+      openAiSidebar('command');
     } else if (key === 'd' && aiEnabled) {
       event.preventDefault();
-      setAiMode('diagnose');
-      setAiOpen(true);
+      openAiSidebar('diagnose');
     } else if (key === 'e') {
       event.preventDefault();
       useStore.getState().splitPane(tabId, paneId, 'row');
@@ -355,11 +318,8 @@ export default function TerminalPane({ tabId, pane, host, isActive, onFocus }) {
           {aiEnabled && (
             <button
               className="icon-btn"
-              title="Ask the AI assistant (Ctrl+Shift+I)"
-              onClick={() => {
-                setAiMode('command');
-                setAiOpen((o) => !o);
-              }}
+              title="Open AI assistant (Ctrl+Shift+I)"
+              onClick={() => openAiSidebar('chat')}
             >
               <SparkIcon size={14} />
             </button>
@@ -434,114 +394,7 @@ export default function TerminalPane({ tabId, pane, host, isActive, onFocus }) {
         </div>
       )}
 
-      {aiOpen && aiEnabled && (
-        <div className="pane-overlay pane-ai">
-          <div className="pane-ai-tabs">
-            <button
-              className={`pane-ai-tab ${aiMode === 'command' ? 'is-active' : ''}`}
-              onClick={() => {
-                setAiMode('command');
-                setAiError(null);
-              }}
-            >
-              Generate Command
-            </button>
-            <button
-              className={`pane-ai-tab ${aiMode === 'diagnose' ? 'is-active' : ''}`}
-              onClick={() => {
-                setAiMode('diagnose');
-                setAiError(null);
-                if (!diagResult) askAi('diagnose');
-              }}
-            >
-              Diagnose & Fix Error
-            </button>
-          </div>
-
-          {aiMode === 'command' ? (
-            <div className="pane-ai-row">
-              <span className="pane-ai-label">Ask</span>
-              <input
-                autoFocus
-                className="input input-sm"
-                placeholder="e.g. show the 10 largest files under /var"
-                value={aiQuery}
-                onChange={(e) => setAiQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') askAi('command');
-                  if (e.key === 'Escape') {
-                    setAiOpen(false);
-                    termRef.current?.focus();
-                  }
-                }}
-              />
-              <button className="btn btn-primary btn-sm" onClick={() => askAi('command')} disabled={aiBusy}>
-                {aiBusy ? 'Thinking...' : 'Insert'}
-              </button>
-            </div>
-          ) : (
-            <div className="pane-ai-row">
-              <span className="pane-ai-label">Error</span>
-              <input
-                autoFocus
-                className="input input-sm"
-                placeholder="Optional hint (e.g. failed to start service)"
-                value={aiQuery}
-                onChange={(e) => setAiQuery(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') askAi('diagnose');
-                  if (e.key === 'Escape') {
-                    setAiOpen(false);
-                    termRef.current?.focus();
-                  }
-                }}
-              />
-              <button className="btn btn-primary btn-sm" onClick={() => askAi('diagnose')} disabled={aiBusy}>
-                {aiBusy ? 'Diagnosing...' : 'Diagnose'}
-              </button>
-            </div>
-          )}
-
-          {diagResult && (
-            <div className="pane-ai-diag-result">
-              <p className="diag-explanation">{diagResult.explanation}</p>
-              {diagResult.fixCommand && (
-                <div className="diag-command-box">
-                  <span className="diag-command-label">Suggested Fix:</span>
-                  <pre className="diag-command-code">{diagResult.fixCommand}</pre>
-                  <button
-                    className="btn btn-primary btn-sm"
-                    onClick={() => {
-                      send('shell:input', { sessionId, paneId, data: diagResult.fixCommand });
-                      setAiOpen(false);
-                      termRef.current?.focus();
-                    }}
-                  >
-                    Insert Fix at Prompt
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-
-          <label className="pane-ai-context">
-            <input
-              type="checkbox"
-              checked={shareContext}
-              onChange={(e) => setShareContext(e.target.checked)}
-            />
-            Send recent terminal output as context
-          </label>
-          {aiError && <p className="pane-ai-error">{aiError}</p>}
-          <p className="pane-ai-hint">
-            {aiMode === 'command'
-              ? 'The suggestion is typed at your prompt. Nothing runs until you press Enter.'
-              : 'Analyzes recent terminal error output to diagnose issues and provide 1-click fixes.'}
-          </p>
-        </div>
-      )}
-
-      <div ref={containerRef} className="pane-xterm" />
+      <div ref={containerRef} className="pane-xterm" data-pane-id={paneId} />
     </div>
   );
 }

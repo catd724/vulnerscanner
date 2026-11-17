@@ -8,7 +8,7 @@ export const runtime = 'nodejs';
  * terminal.ai - natural-language to shell command and error diagnosis.
  */
 
-const OPENCODE_ENDPOINT = (process.env.OPENCODE_GO_API_URL || 'https://api.opencode.go/v1/chat/completions').replace(/\/$/, '');
+const OPENCODE_ENDPOINT = (process.env.OPENCODE_GO_API_URL || 'https://opencode.ai/zen/go/v1/chat/completions').replace(/\/$/, '');
 const OPENCODE_MODEL = process.env.OPENCODE_GO_MODEL || 'kimi-k2.5-code';
 const OPENROUTER_ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_MODEL = process.env.AI_MODEL || 'anthropic/claude-sonnet-4.5';
@@ -19,6 +19,12 @@ const SYSTEM_PROMPT_COMMAND = [
   'No markdown fences, no explanation, no surrounding prose.',
   'Chain multiple steps with && when one command cannot do it.',
   'Prefer POSIX-portable syntax unless the context shows a specific shell.',
+].join(' ');
+
+const SYSTEM_PROMPT_CHAT = [
+  'You are a helpful assistant embedded in an SSH client.',
+  'Answer the user\'s question concisely. You may explain shell concepts, interpret terminal output,',
+  'or suggest next steps. When the user asks for a command, you may provide it inside a markdown code block.',
 ].join(' ');
 
 const SYSTEM_PROMPT_DIAGNOSE = [
@@ -83,6 +89,7 @@ export const POST = route(async (request) => {
   let systemPrompt;
   if (mode === 'diagnose') systemPrompt = SYSTEM_PROMPT_DIAGNOSE;
   else if (mode === 'vuln-analyze') systemPrompt = SYSTEM_PROMPT_VULN_ANALYZE;
+  else if (mode === 'chat') systemPrompt = SYSTEM_PROMPT_CHAT;
   else systemPrompt = SYSTEM_PROMPT_COMMAND;
 
   if (context && context.trim()) {
@@ -108,6 +115,8 @@ export const POST = route(async (request) => {
         : 'Diagnose the last failed command in the terminal output and provide the fix.'
       : mode === 'vuln-analyze'
         ? 'Analyze the attached vulnerability scan report and provide remediation guidance.'
+      : mode === 'chat'
+        ? query
         : query;
 
   const headers = {
@@ -116,6 +125,10 @@ export const POST = route(async (request) => {
   };
   if (provider === 'openrouter') {
     headers['X-Title'] = 'AI Terminal';
+  }
+  if (provider === 'opencode') {
+    // OpenCode Go requires this header for routing/prompt caching.
+    headers['x-opencode-session'] = 'ai-terminal-session';
   }
 
   const response = await fetch(endpoint, {
@@ -128,7 +141,7 @@ export const POST = route(async (request) => {
         { role: 'user', content: userMessage },
       ],
       temperature: 0.2,
-      max_tokens: mode === 'vuln-analyze' ? 1200 : 450,
+      max_tokens: mode === 'vuln-analyze' ? 2048 : 1024,
     }),
   });
 
@@ -144,7 +157,12 @@ export const POST = route(async (request) => {
   const data = await response.json();
   const rawText = stripFences(data.choices?.[0]?.message?.content || '');
 
-  if (!rawText) throw new Error('The model returned an empty response');
+  if (!rawText) {
+    console.error('[ai] Empty response from model:', model, JSON.stringify(data).slice(0, 800));
+    throw new Error(
+      `The model ${model} returned an empty response. It may be unavailable, rate-limited, or the API key may be exhausted. Check the model slug or try a different model.`
+    );
+  }
 
   if (mode === 'diagnose') {
     try {
@@ -168,6 +186,10 @@ export const POST = route(async (request) => {
 
   if (mode === 'vuln-analyze') {
     return { mode: 'vuln-analyze', analysis: rawText, model };
+  }
+
+  if (mode === 'chat') {
+    return { mode: 'chat', answer: rawText, model };
   }
 
   return { mode: 'command', command: rawText, model };

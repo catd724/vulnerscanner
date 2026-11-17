@@ -123,6 +123,19 @@ export const ConnectIcon = (props) => (
   </Svg>
 );
 
+export const SendIcon = (props) => (
+  <Svg {...props}>
+    <path d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z" />
+  </Svg>
+);
+
+export const TerminalIcon = (props) => (
+  <Svg {...props}>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M7 9.5 10.5 12 7 14.5M11.5 14.5H17" />
+  </Svg>
+);
+
 export const RefreshIcon = (props) => (
   <Svg {...props}>
     <path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v4h-4" />
@@ -146,6 +159,19 @@ export const SparkIcon = (props) => (
   <Svg {...props}>
     <path d="M12 3.5 13.7 9l5.5 1.7-5.5 1.8L12 18l-1.7-5.5L4.8 10.7 10.3 9 12 3.5Z" />
     <path d="M18.5 16.5 19.2 18.5 21 19.2 19.2 20 18.5 22 17.8 20 16 19.2 17.8 18.5 18.5 16.5Z" />
+  </Svg>
+);
+
+export const AiIcon = (props) => (
+  <Svg {...props}>
+    <path d="M12 2 14.5 9.5 22 12 14.5 14.5 12 22 9.5 14.5 2 12 9.5 9.5 12 2Z" />
+    <path d="M18.5 16.5 19.2 18.5 21 19.2 19.2 20 18.5 22 17.8 20 16 19.2 17.8 18.5 18.5 16.5Z" />
+  </Svg>
+);
+
+export const ChatIcon = (props) => (
+  <Svg {...props}>
+    <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7A8.38 8.38 0 0 1 4 11.5a8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5Z" />
   </Svg>
 );
 
