@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useStore } from '@/lib/store';
 import { SparkIcon, SendIcon, TrashIcon, TerminalIcon } from './Icons';
+import MarkdownRenderer from './MarkdownRenderer';
 
 const MODES = [
   { key: 'chat', label: 'Ask' },
@@ -185,7 +186,9 @@ export default function AiSidebar() {
                 </div>
               ) : msg.mode === 'diagnose' && (msg.explanation || msg.fixCommand) ? (
                 <div className="ai-diagnose-block">
-                  <p className="ai-diagnose-text">{msg.explanation}</p>
+                  <div className="ai-diagnose-text">
+                    <MarkdownRenderer>{msg.explanation}</MarkdownRenderer>
+                  </div>
                   {msg.fixCommand && (
                     <div className="ai-command-block">
                       <pre className="ai-command-code">{msg.fixCommand}</pre>
@@ -199,7 +202,7 @@ export default function AiSidebar() {
                   )}
                 </div>
               ) : (
-                <div className="ai-prose">{msg.content}</div>
+                <MarkdownRenderer>{msg.content}</MarkdownRenderer>
               )}
             </div>
           </div>

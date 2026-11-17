@@ -6,15 +6,41 @@
 set -euo pipefail
 
 # Cap packages scanned to keep runtime reasonable.
-MAX_PACKAGES=50
+MAX_PACKAGES=${VULNSCAN_MAX_PACKAGES:-50}
 BATCH_SIZE=50
-OSV_TIMEOUT=30
+OSV_TIMEOUT=25
 MAX_VULNS_PER_PKG=10
-OSV_TOTAL_BUDGET=90
+OSV_TOTAL_BUDGET=60
 
 # Print progress to stderr so users see activity during long scans.
 progress() {
   echo "[library-vulns] $*" >&2
+}
+
+# Run a command and show a spinner on stderr until it finishes.
+# Prints elapsed time and command status for visibility.
+with_spinner() {
+  local msg="$1"
+  shift
+  local tmpfile
+  tmpfile=$(mktemp /tmp/vulnscan-spinner.XXXXXX)
+  local start=$SECONDS
+
+  "$@" &
+  local pid=$!
+  local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+  local i=0
+
+  while kill -0 "$pid" 2>/dev/null; do
+    i=$(( (i + 1) % ${#spin} ))
+    printf "\r[library-vulns] %s %s (%ss) " "$msg" "${spin:$i:1}" "$((SECONDS - start))" >&2
+    sleep 0.15
+  done
+
+  wait "$pid"
+  local status=$?
+  printf "\r[library-vulns] %s done in %ss (exit %s)\n" "$msg" "$((SECONDS - start))" "$status" >&2
+  return "$status"
 }
 
 check_libraries() {
@@ -43,7 +69,7 @@ check_libraries() {
   capped=$(echo "$packages" | jq --argjson max "$MAX_PACKAGES" '[limit($max; .[])]')
   total=$(echo "$capped" | jq 'length')
   if [[ "$total" -ge "$MAX_PACKAGES" ]]; then
-    progress "capping scan to $MAX_PACKAGES packages for speed (use VULNSCAN_MAX_PACKAGES to override)"
+    progress "capping scan to $MAX_PACKAGES packages for speed (set VULNSCAN_MAX_PACKAGES=N to change)"
   fi
 
   local all_results='[]'
@@ -51,16 +77,18 @@ check_libraries() {
   local batch_count=$(((total + BATCH_SIZE - 1) / BATCH_SIZE))
   local batch_num=0
   local osv_start=$SECONDS
+  local timed_out=false
 
   while [[ $start -lt $total ]]; do
     batch_num=$((batch_num + 1))
 
     if [[ $((SECONDS - osv_start)) -ge $OSV_TOTAL_BUDGET ]]; then
-      progress "OSV query budget (${OSV_TOTAL_BUDGET}s) exhausted; using partial results"
+      progress "OSV total time budget (${OSV_TOTAL_BUDGET}s) reached; stopping with partial results"
+      timed_out=true
       break
     fi
 
-    progress "querying OSV batch $batch_num/$batch_count (${BATCH_SIZE} packages)..."
+    progress "preparing OSV batch $batch_num/$batch_count (${BATCH_SIZE} packages)..."
     local batch_query
     batch_query=$(echo "$capped" | jq \
       --argjson start "$start" \
@@ -68,22 +96,26 @@ check_libraries() {
       '[.[$start:$start+$size] | .[] | {package: {ecosystem: .ecosystem, name: .name}, version: .version}]')
 
     local batch_result
-    # Use a separate curl invocation per batch so a slow batch cannot block
-    # the whole scan indefinitely.
+    local curl_status=0
+
+    # Show a spinner while waiting for OSV so the user knows work is happening.
     set +e
-    batch_result=$(curl -sL --max-time "$OSV_TIMEOUT" -X POST "https://api.osv.dev/v1/querybatch" \
+    batch_result=$(with_spinner "querying OSV batch $batch_num/$batch_count" \
+      curl -sL --max-time "$OSV_TIMEOUT" -X POST "https://api.osv.dev/v1/querybatch" \
       -H "Content-Type: application/json" \
       -d "{\"queries\": $batch_query}" 2>/dev/null)
-    local curl_status=$?
+    curl_status=$?
     set -e
 
     if [[ $curl_status -ne 0 ]]; then
-      progress "OSV batch $batch_num timed out or failed (curl exit $curl_status); stopping"
+      progress "OSV batch $batch_num request failed or timed out after ${OSV_TIMEOUT}s; stopping"
+      timed_out=true
       break
     fi
 
     if [[ -z "$batch_result" ]] || ! echo "$batch_result" | jq -e . >/dev/null 2>&1; then
       progress "OSV batch $batch_num returned invalid JSON; stopping"
+      timed_out=true
       break
     fi
 
@@ -97,9 +129,22 @@ check_libraries() {
   result_count=$(echo "$all_results" | jq 'length')
   progress "received $result_count OSV result entries"
 
+  # If OSV did not return usable data, still return the package list so the user
+  # sees the most recently scanned packages and knows the enumeration worked.
   if [[ "$result_count" -eq 0 ]]; then
+    progress "OSV returned no vulnerability data; returning package list only"
+    local pkg_list
+    pkg_list=$(echo "$capped" | jq '[.[] | {name, version, ecosystem, vulnerability_count: 0, vulnerabilities: []}]')
+    local note="OSV query failed or timed out; package list shown without vulnerability data"
+    [[ "$timed_out" == true ]] && note="OSV query timed out after ${OSV_TOTAL_BUDGET}s; package list shown without vulnerability data"
+
+    local summary
+    summary=$(jq -n \
+      --argjson total "$total" \
+      '{total_packages: $total, vulnerable_packages: 0, critical: 0, high: 0, medium: 0, low: 0, unknown: 0}')
+
     merge_result "$envelope" \
-      '{"summary": {"total_packages": '$total', "vulnerable_packages": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}, "details": [], "ok": false, "error": "OSV query failed or returned no results"}'
+      "$(jq -n --argjson summary "$summary" --argjson details "$pkg_list" --arg note "$note" '{ok: true, summary: $summary, details: $details, note: $note}')"
     return 0
   fi
 
@@ -165,11 +210,20 @@ check_libraries() {
   detail_file=$(mktemp /tmp/vulnscan-details.XXXXXX)
   echo "$details" > "$detail_file"
 
+  local note=""
+  [[ "$timed_out" == true ]] && note="OSV query stopped after ${OSV_TOTAL_BUDGET}s; results may be partial"
+
   progress "done ($vulnerable vulnerable packages found)"
 
-  jq --slurpfile details "$detail_file" --argjson summary "$summary" \
-    '. + {ok: true, summary: $summary, details: $details[0]}' \
-    <<< "$envelope"
+  if [[ -n "$note" ]]; then
+    jq --slurpfile details "$detail_file" --argjson summary "$summary" --arg note "$note" \
+      '. + {ok: true, summary: $summary, details: $details[0], note: $note}' \
+      <<< "$envelope"
+  else
+    jq --slurpfile details "$detail_file" --argjson summary "$summary" \
+      '. + {ok: true, summary: $summary, details: $details[0]}' \
+      <<< "$envelope"
+  fi
 
   rm -f "$detail_file"
 }

@@ -3551,6 +3551,110 @@ input[type='color'].input {
   white-space: pre-wrap;
 }
 
+.ai-message-body h1,
+.ai-message-body h2,
+.ai-message-body h3,
+.ai-message-body h4 {
+  margin: var(--s-2) 0 var(--s-1);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.ai-message-body h1 {
+  font-size: var(--t-md);
+}
+
+.ai-message-body h2 {
+  font-size: var(--t-base);
+}
+
+.ai-message-body h3,
+.ai-message-body h4 {
+  font-size: var(--t-sm);
+}
+
+.ai-message-body p {
+  margin-bottom: var(--s-2);
+}
+
+.ai-message-body p:last-child {
+  margin-bottom: 0;
+}
+
+.ai-message-body ul,
+.ai-message-body ol {
+  margin: var(--s-1) 0 var(--s-2) var(--s-3);
+  padding-left: var(--s-3);
+}
+
+.ai-message-body li {
+  margin-bottom: 2px;
+}
+
+.ai-message-body strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.ai-message-body a {
+  color: var(--accent-cyan);
+  text-decoration: none;
+}
+
+.ai-message-body a:hover {
+  text-decoration: underline;
+}
+
+.ai-inline-code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--ink-900);
+  color: var(--accent-green);
+  font-family: var(--font-mono);
+  font-size: var(--m-sm);
+}
+
+.ai-code-block {
+  margin: var(--s-2) 0;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.ai-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: 0.25rem 0.4rem;
+  background: var(--ink-900);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.ai-code-lang {
+  font-size: var(--t-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+.ai-code-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.ai-code-pre {
+  margin: 0;
+  padding: var(--s-2);
+  background: var(--ink-900);
+  color: var(--accent-green);
+  font-family: var(--font-mono);
+  font-size: var(--m-sm);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow-x: auto;
+}
+
 .ai-command-block {
   display: flex;
   flex-direction: column;
