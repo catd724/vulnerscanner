@@ -3358,6 +3358,16 @@ input[type='color'].input {
   color: var(--text-muted);
 }
 
+.vuln-package-priority {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent-color);
+  color: var(--bg-primary);
+}
+
 .vuln-cves {
   display: flex;
   flex-wrap: wrap;

@@ -450,6 +450,11 @@ function ScanResultView({ scan }) {
               <div key={pkg.name} className="vuln-package">
                 <div className="vuln-package-header">
                   <span className="vuln-package-name">{pkg.name}</span>
+                  {pkg.priority && (
+                    <span className="vuln-package-priority" title="Package priority">
+                      {pkg.priority}
+                    </span>
+                  )}
                   <span className="vuln-package-version">{pkg.version}</span>
                   {pkg.update_available && (
                     <span className="vuln-package-version">→ {pkg.update_available}</span>
@@ -467,6 +472,7 @@ function ScanResultView({ scan }) {
                       {v.id}{' '}
                       <span style={{ color: getSeverityColor(v.severity) }}>
                         {v.severity}
+                        {v.cvss_score ? ` (${v.cvss_score})` : ''}
                       </span>
                     </span>
                   ))}
