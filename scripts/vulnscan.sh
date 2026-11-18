@@ -188,15 +188,10 @@ format_services() {
       echo
     fi
     local running_units
-    running_units=$(echo "$result" | jq -r '[.details[]? | select(.state == "running") | .unit] | .[0:20] | join("\n")')
+    running_units=$(echo "$result" | jq -r '[.details[]? | select(.state == "running") | .unit] | .[]')
     if [[ -n "$running_units" ]]; then
       echo "Running services:"
       echo "$running_units" | sed 's/^/  - /'
-      local running_count
-      running_count=$(echo "$result" | jq '[.details[]? | select(.state == "running")] | length')
-      if [[ "$running_count" -gt 20 ]]; then
-        echo "  ... and $((running_count - 20)) more"
-      fi
     fi
   fi
 }
