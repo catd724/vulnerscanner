@@ -15,30 +15,46 @@ check_services() {
     return 0
   fi
 
-  local units
-  units=$(systemctl list-units --type=service --state=running,failed --no-pager --no-legend 2>/dev/null || true)
-
   local details="[]"
   local total=0 running=0 failed=0 other=0
 
-  while IFS= read -r line; do
-    [[ -z "$line" ]] && continue
-    local unit state
-    # systemctl output: "● service.service loaded active running"
-    unit=$(echo "$line" | awk '{print $2}')
-    state=$(echo "$line" | awk '{print $5}')
-    [[ -z "$unit" ]] && continue
+  # Prefer JSON output when available (systemd >= 236) for reliable parsing.
+  if systemctl list-units --help 2>/dev/null | grep -q -- '--output='; then
+    local json_units
+    json_units=$(systemctl list-units --type=service --state=running,failed --no-pager --no-legend --output=json 2>/dev/null || true)
+    if [[ -n "$json_units" ]] && echo "$json_units" | jq -e . >/dev/null 2>&1; then
+      details=$(echo "$json_units" | jq '[.[] | {unit, state: .sub}]')
+      total=$(echo "$details" | jq 'length')
+      running=$(echo "$details" | jq '[.[] | select(.state == "running")] | length')
+      failed=$(echo "$details" | jq '[.[] | select(.state == "failed")] | length')
+      other=$((total - running - failed))
+    fi
+  fi
 
-    total=$((total + 1))
-    case "$state" in
-      running) running=$((running + 1)) ;;
-      failed) failed=$((failed + 1)) ;;
-      *) other=$((other + 1)) ;;
-    esac
+  # Fallback to text parsing if JSON did not work.
+  if [[ "$total" -eq 0 ]]; then
+    local units
+    units=$(systemctl list-units --type=service --state=running,failed --no-pager --no-legend 2>/dev/null || true)
 
-    details=$(echo "$details" | jq --arg unit "$unit" --arg state "$state" \
-      '. + [{unit: $unit, state: $state}]')
-  done <<< "$units"
+    while IFS= read -r line; do
+      [[ -z "$line" ]] && continue
+      local unit state
+      # systemctl output: "● service.service loaded active running"
+      unit=$(echo "$line" | awk '{print $2}')
+      state=$(echo "$line" | awk '{print $5}')
+      [[ -z "$unit" ]] && continue
+
+      total=$((total + 1))
+      case "$state" in
+        running) running=$((running + 1)) ;;
+        failed) failed=$((failed + 1)) ;;
+        *) other=$((other + 1)) ;;
+      esac
+
+      details=$(echo "$details" | jq --arg unit "$unit" --arg state "$state" \
+        '. + [{unit: $unit, state: $state}]')
+    done <<< "$units"
+  fi
 
   local summary
   summary=$(jq -n \
