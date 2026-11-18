@@ -123,42 +123,163 @@ format_human() {
 
   case "$scan_type" in
     library_vulns)
-      local summary
-      summary=$(echo "$result" | jq -r '.summary // {}')
-      local total
-      total=$(echo "$summary" | jq -r '.total_packages // 0')
-      local vuln
-      vuln=$(echo "$summary" | jq -r '.vulnerable_packages // 0')
-      echo "Pending security updates: $vuln package(s) (from $total security repo updates)"
-      echo
-      local details
-      details=$(echo "$result" | jq -c '.details // [] | .[]')
-      if [[ -n "$details" ]]; then
-        printf "%-30s %-12s %-30s\n" "PACKAGE" "PRIORITY" "UPDATE"
-        printf "%-30s %-12s %-30s\n" "------" "--------" "------"
-        while IFS= read -r line; do
-          local name priority update
-          name=$(echo "$line" | jq -r '.name // "-"')
-          priority=$(echo "$line" | jq -r '.priority // "-"')
-          update=$(echo "$line" | jq -r '.update_available // "-"')
-          printf "%-30s %-12s %-30s\n" "$name" "$priority" "$update"
-        done <<< "$details"
-      fi
+      format_library_vulns "$result"
       ;;
     services)
-      echo "Services check completed. See JSON output for details."
+      format_services "$result"
       ;;
     docker)
-      echo "Docker check completed. See JSON output for details."
+      format_docker "$result"
       ;;
     pm2)
-      echo "PM2 check completed. See JSON output for details."
+      format_pm2 "$result"
       ;;
     full)
-      echo "Full scan completed. See JSON output for details."
+      format_full "$result"
       ;;
   esac
   echo
+}
+
+format_library_vulns() {
+  local result="$1"
+  local summary
+  summary=$(echo "$result" | jq -r '.summary // {}')
+  local total
+  total=$(echo "$summary" | jq -r '.total_packages // 0')
+  local vuln
+  vuln=$(echo "$summary" | jq -r '.vulnerable_packages // 0')
+  echo "Pending security updates: $vuln package(s) (from $total security repo updates)"
+  echo
+  local details
+  details=$(echo "$result" | jq -c '.details // [] | .[]')
+  if [[ -n "$details" ]]; then
+    printf "%-30s %-12s %-30s\n" "PACKAGE" "PRIORITY" "UPDATE"
+    printf "%-30s %-12s %-30s\n" "------" "--------" "------"
+    while IFS= read -r line; do
+      local name priority update
+      name=$(echo "$line" | jq -r '.name // "-"')
+      priority=$(echo "$line" | jq -r '.priority // "-"')
+      update=$(echo "$line" | jq -r '.update_available // "-"')
+      printf "%-30s %-12s %-30s\n" "$name" "$priority" "$update"
+    done <<< "$details"
+  fi
+}
+
+format_services() {
+  local result="$1"
+  local summary
+  summary=$(echo "$result" | jq -r '.summary // {}')
+  local total running failed other
+  total=$(echo "$summary" | jq -r '.total // 0')
+  running=$(echo "$summary" | jq -r '.running // 0')
+  failed=$(echo "$summary" | jq -r '.failed // 0')
+  other=$(echo "$summary" | jq -r '.other // 0')
+  echo "Services: $total total | $running running | $failed failed | $other other"
+  echo
+  local details
+  details=$(echo "$result" | jq -c '.details // [] | .[]')
+  if [[ -n "$details" ]]; then
+    local failed_units
+    failed_units=$(echo "$result" | jq -r '[.details[]? | select(.state == "failed") | .unit] | join("\n")')
+    if [[ -n "$failed_units" ]]; then
+      echo "Failed services:"
+      echo "$failed_units" | sed 's/^/  - /'
+      echo
+    fi
+    echo "Running services:"
+    echo "$result" | jq -r '[.details[]? | select(.state == "running") | .unit] | .[0:20] | .[]' | sed 's/^/  - /'
+    local running_count
+    running_count=$(echo "$result" | jq '[.details[]? | select(.state == "running")] | length')
+    if [[ "$running_count" -gt 20 ]]; then
+      echo "  ... and $((running_count - 20)) more"
+    fi
+  fi
+}
+
+format_docker() {
+  local result="$1"
+  local summary
+  summary=$(echo "$result" | jq -r '.summary // {}')
+  local daemon_up containers images vulnerable
+  daemon_up=$(echo "$summary" | jq -r '.daemon_up // false')
+  containers=$(echo "$summary" | jq -r '.containers // 0')
+  images=$(echo "$summary" | jq -r '.images // 0')
+  vulnerable=$(echo "$summary" | jq -r '.vulnerable_images // 0')
+  echo "Docker daemon: $([[ "$daemon_up" == "true" ]] && echo up || echo down)"
+  echo "Containers: $containers | Images: $images | Vulnerable images: $vulnerable"
+  echo
+  local image_list
+  image_list=$(echo "$result" | jq -c '.details.images // [] | .[]')
+  if [[ -n "$image_list" ]]; then
+    echo "Images scanned:"
+    while IFS= read -r line; do
+      local repo tag id vuln_count
+      repo=$(echo "$line" | jq -r '.Repository // "-"')
+      tag=$(echo "$line" | jq -r '.Tag // "-"')
+      id=$(echo "$line" | jq -r '.ID // "-"')
+      vuln_count=$(echo "$line" | jq -r '(.vulnerabilities // []) | length')
+      printf "  - %s:%s (%s) - %s vulnerabilities\n" "$repo" "$tag" "$id" "$vuln_count"
+    done <<< "$image_list"
+  fi
+}
+
+format_pm2() {
+  local result="$1"
+  local summary
+  summary=$(echo "$result" | jq -r '.summary // {}')
+  local total online errored other
+  total=$(echo "$summary" | jq -r '.total // 0')
+  online=$(echo "$summary" | jq -r '.online // 0')
+  errored=$(echo "$summary" | jq -r '.errored // 0')
+  other=$(echo "$summary" | jq -r '.other // 0')
+  echo "PM2 processes: $total total | $online online | $errored errored | $other other"
+  echo
+  local details
+  details=$(echo "$result" | jq -c '.details // [] | .[]')
+  if [[ -n "$details" ]]; then
+    printf "%-24s %-10s %-10s\n" "NAME" "STATUS" "RESTARTS"
+    printf "%-24s %-10s %-10s\n" "----" "------" "--------"
+    while IFS= read -r line; do
+      local name status restarts
+      name=$(echo "$line" | jq -r '.name // "-"')
+      status=$(echo "$line" | jq -r '.status // "-"')
+      restarts=$(echo "$line" | jq -r '.restarts // 0')
+      printf "%-24s %-10s %-10s\n" "$name" "$status" "$restarts"
+    done <<< "$details"
+  fi
+}
+
+format_full() {
+  local result="$1"
+  echo "Full scan summary:"
+  echo
+  local services docker pm2 libraries
+  services=$(echo "$result" | jq '.results.services // {}')
+  docker=$(echo "$result" | jq '.results.docker // {}')
+  pm2=$(echo "$result" | jq '.results.pm2 // {}')
+  libraries=$(echo "$result" | jq '.results.libraries // {}')
+
+  if [[ -n "$services" && "$services" != "{}" ]]; then
+    echo "--- Services ---"
+    format_services "$services"
+    echo
+  fi
+  if [[ -n "$docker" && "$docker" != "{}" ]]; then
+    echo "--- Docker ---"
+    format_docker "$docker"
+    echo
+  fi
+  if [[ -n "$pm2" && "$pm2" != "{}" ]]; then
+    echo "--- PM2 ---"
+    format_pm2 "$pm2"
+    echo
+  fi
+  if [[ -n "$libraries" && "$libraries" != "{}" ]]; then
+    echo "--- Library vulnerabilities ---"
+    format_library_vulns "$libraries"
+    echo
+  fi
 }
 
 # Output a result, either as JSON or human-readable depending on OUTPUT_JSON.
