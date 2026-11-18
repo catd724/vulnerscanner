@@ -90,6 +90,7 @@ export default function VulnScanner() {
   const addAiMessage = useStore((s) => s.addAiMessage);
   const setAiBusyGlobal = useStore((s) => s.setAiBusy);
   const getActivePaneContext = useStore((s) => s.getActivePaneContext);
+  const aiMessages = useStore((s) => s.aiMessages);
 
   const [scriptUrl, setScriptUrl] = useState(() => {
     try {
@@ -207,6 +208,7 @@ export default function VulnScanner() {
           mode: 'vuln-analyze',
           query: userText,
           context,
+          history: aiMessages.slice(-10),
         }),
       });
       const data = await response.json();
@@ -250,7 +252,7 @@ export default function VulnScanner() {
       setAiBusy(false);
       setAiBusyGlobal(false);
     }
-  }, [activeScan, aiEnabled, addAiMessage, addScan, setNav, setAiBusyGlobal, getActivePaneContext, toast]);
+  }, [activeScan, aiEnabled, addAiMessage, addScan, setNav, setAiBusyGlobal, getActivePaneContext, aiMessages, toast]);
 
   const copyCommand = useCallback(
     (type) => {

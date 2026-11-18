@@ -66,7 +66,7 @@ export const POST = route(async (request) => {
     );
   }
 
-  const { query, context, mode = 'command' } = await body(request);
+  const { query, context, mode = 'command', history = [] } = await body(request);
 
   if (mode === 'command' && (!query || !query.trim())) {
     throw new Error('A query is required');
@@ -134,6 +134,11 @@ export const POST = route(async (request) => {
     headers['x-opencode-session'] = 'ai-terminal-session';
   }
 
+  const recentHistory = (history || [])
+    .slice(-10)
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => ({ role: m.role, content: m.content || '' }));
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers,
@@ -141,6 +146,7 @@ export const POST = route(async (request) => {
       model,
       messages: [
         { role: 'system', content: systemPrompt },
+        ...recentHistory,
         { role: 'user', content: userMessage },
       ],
       temperature: 0.2,

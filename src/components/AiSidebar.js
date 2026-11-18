@@ -36,7 +36,7 @@ export default function AiSidebar() {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, busy, error]);
 
-  const runRequest = async (userText, requestMode, contextOverride) => {
+  const runRequest = async (userText, requestMode, contextOverride, history = []) => {
     setError(null);
     setAiBusy(true);
 
@@ -45,7 +45,7 @@ export default function AiSidebar() {
       const response = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: userText, context, mode: requestMode }),
+        body: JSON.stringify({ query: userText, context, mode: requestMode, history }),
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Request failed');
@@ -73,7 +73,8 @@ export default function AiSidebar() {
     const lastUser = [...messages].reverse().find((m) => m.role === 'user');
     if (lastUser?.autoSend && !autoSentRef.current.has(lastUser.id) && !busy) {
       autoSentRef.current.add(lastUser.id);
-      runRequest(lastUser.content, lastUser.mode, lastUser.context);
+      const history = messages.filter((m) => m.id !== lastUser.id).slice(-10);
+      runRequest(lastUser.content, lastUser.mode, lastUser.context, history);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, busy]);
@@ -92,7 +93,8 @@ export default function AiSidebar() {
       context,
     });
 
-    await runRequest(userText, mode, context);
+    const history = messages.slice(-10);
+    await runRequest(userText, mode, context, history);
   };
 
   const insertAtPrompt = (text) => {
